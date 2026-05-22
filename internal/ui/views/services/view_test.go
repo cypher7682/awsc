@@ -33,9 +33,10 @@ func TestView_Refresh(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Should have populated the list
-	if v.list.GetItemCount() == 0 {
-		t.Error("expected list to have items after refresh")
+	// Table should have rows
+	rowCount := v.table.GetRowCount()
+	if rowCount == 0 {
+		t.Error("expected table to have rows after refresh")
 	}
 }
 

@@ -3,6 +3,7 @@ package services
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -25,7 +26,7 @@ type Navigator interface {
 
 // View displays the list of available services.
 type View struct {
-	list      *tview.List
+	table     *tview.Table
 	navigator Navigator
 	services  []ServiceEntry
 }
@@ -33,7 +34,7 @@ type View struct {
 // NewView creates a new services view.
 func NewView(navigator Navigator) *View {
 	v := &View{
-		list:      tview.NewList(),
+		table:     tview.NewTable(),
 		navigator: navigator,
 		services: []ServiceEntry{
 			{Name: "EC2", Command: "ec2", Description: "Elastic Compute Cloud - Virtual Servers", Status: "supported"},
@@ -50,13 +51,23 @@ func NewView(navigator Navigator) *View {
 		},
 	}
 
-	v.list.SetTitle(" AWS Services ")
-	v.list.SetBorder(true)
-	v.list.SetBorderColor(tcell.ColorDodgerBlue)
-	v.list.SetSelectedBackgroundColor(tcell.ColorDodgerBlue)
-	v.list.SetSelectedTextColor(tcell.ColorWhite)
-	v.list.ShowSecondaryText(true)
-	v.list.SetHighlightFullLine(true)
+	v.table.SetTitle(" AWS Services ")
+	v.table.SetBorder(true)
+	v.table.SetBorderColor(tcell.ColorDodgerBlue)
+	v.table.SetSelectable(true, false)
+	v.table.SetSelectedStyle(tcell.StyleDefault.
+		Background(tcell.ColorDodgerBlue).
+		Foreground(tcell.ColorWhite))
+
+	v.table.SetSelectedFunc(func(row, _ int) {
+		if row < 0 || row >= len(v.services) {
+			return
+		}
+		svc := v.services[row]
+		if svc.Status != "planned" {
+			v.navigator.Navigate(navigation.Route{Resource: svc.Command})
+		}
+	})
 
 	return v
 }
@@ -68,29 +79,63 @@ func (v *View) Name() string {
 
 // Render returns the tview primitive.
 func (v *View) Render() tview.Primitive {
-	return v.list
+	return v.table
 }
 
 // Refresh reloads the service list.
 func (v *View) Refresh(_ context.Context) error {
-	v.list.Clear()
-	for _, svc := range v.services {
-		s := svc // capture
+	v.table.Clear()
+	for row, svc := range v.services {
 		statusIcon := "[green]\u2714" // checkmark
-		if s.Status == "planned" {
+		statusColor := tcell.ColorGreen
+		if svc.Status == "planned" {
 			statusIcon = "[gray]\u2022" // bullet
-		} else if s.Status == "partial" {
+			statusColor = tcell.ColorGray
+		} else if svc.Status == "partial" {
 			statusIcon = "[yellow]\u25CB" // circle
+			statusColor = tcell.ColorYellow
 		}
 
-		mainText := statusIcon + "[-] " + s.Name
-		secondaryText := "    " + s.Description
+		_ = statusIcon // used only for reference
 
-		v.list.AddItem(mainText, secondaryText, 0, func() {
-			if s.Status != "planned" {
-				v.navigator.Navigate(navigation.Route{Resource: s.Command})
-			}
-		})
+		// Status column
+		icon := "\u2714"
+		if svc.Status == "planned" {
+			icon = "\u2022"
+		} else if svc.Status == "partial" {
+			icon = "\u25CB"
+		}
+		v.table.SetCell(row, 0, tview.NewTableCell(icon).
+			SetTextColor(statusColor).
+			SetSelectable(true).
+			SetExpansion(0))
+
+		// Service name
+		v.table.SetCell(row, 1, tview.NewTableCell(fmt.Sprintf(" %-18s", svc.Name)).
+			SetTextColor(tcell.ColorWhite).
+			SetSelectable(true).
+			SetExpansion(0))
+
+		// Command shortcut
+		cmdText := fmt.Sprintf(":%s", svc.Command)
+		cmdColor := tcell.ColorDodgerBlue
+		if svc.Status == "planned" {
+			cmdColor = tcell.ColorDarkGray
+		}
+		v.table.SetCell(row, 2, tview.NewTableCell(fmt.Sprintf(" %-14s", cmdText)).
+			SetTextColor(cmdColor).
+			SetSelectable(true).
+			SetExpansion(0))
+
+		// Description
+		descColor := tcell.ColorLightGray
+		if svc.Status == "planned" {
+			descColor = tcell.ColorDarkGray
+		}
+		v.table.SetCell(row, 3, tview.NewTableCell(" "+svc.Description).
+			SetTextColor(descColor).
+			SetSelectable(true).
+			SetExpansion(1))
 	}
 	return nil
 }

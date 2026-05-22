@@ -330,6 +330,11 @@ func (s *Service) RemoveIngressRule(ctx context.Context, groupID string, rule SG
 
 // instanceFromAWS converts an AWS EC2 instance to our internal representation.
 func instanceFromAWS(inst types.Instance) Instance {
+	var az string
+	if inst.Placement != nil {
+		az = aws.ToString(inst.Placement.AvailabilityZone)
+	}
+
 	i := Instance{
 		InstanceID: aws.ToString(inst.InstanceId),
 		Type:       string(inst.InstanceType),
@@ -338,7 +343,7 @@ func instanceFromAWS(inst types.Instance) Instance {
 		VPCID:      aws.ToString(inst.VpcId),
 		SubnetID:   aws.ToString(inst.SubnetId),
 		Platform:   aws.ToString(inst.PlatformDetails),
-		AZ:         aws.ToString(inst.Placement.AvailabilityZone),
+		AZ:         az,
 		AMI:        aws.ToString(inst.ImageId),
 		KeyName:    aws.ToString(inst.KeyName),
 		Tags:       make(map[string]string),

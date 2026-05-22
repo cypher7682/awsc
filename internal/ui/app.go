@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -15,6 +16,9 @@ import (
 	"github.com/tpriestnall/awsc/internal/navigation"
 	"github.com/tpriestnall/awsc/internal/ui/components"
 )
+
+// DefaultTimeout is the maximum time for any single AWS API call.
+const DefaultTimeout = 15 * time.Second
 
 // View is the interface that all resource views must implement.
 type View interface {
@@ -41,10 +45,10 @@ type App struct {
 	layout   *tview.Flex
 
 	// Core state
-	config    *config.AppConfig
-	client    *awsclient.Client
-	nav       *navigation.Stack
-	commands  *navigation.CommandRegistry
+	config   *config.AppConfig
+	client   *awsclient.Client
+	nav      *navigation.Stack
+	commands *navigation.CommandRegistry
 
 	// Services
 	ec2Service *ec2.Service
@@ -69,8 +73,10 @@ func NewApp(cfg *config.AppConfig) (*App, error) {
 		return nil, fmt.Errorf("creating AWS client: %w", err)
 	}
 
+	tviewApp := tview.NewApplication()
+
 	app := &App{
-		tviewApp: tview.NewApplication(),
+		tviewApp: tviewApp,
 		pages:    tview.NewPages(),
 		header:   components.NewHeader(),
 		omnibox:  components.NewOmnibox(),
@@ -101,7 +107,7 @@ func NewApp(cfg *config.AppConfig) (*App, error) {
 	app.layout.AddItem(app.omnibox, 1, 0, false)
 
 	// Set up global input handling
-	app.tviewApp.SetInputCapture(app.globalInputHandler)
+	tviewApp.SetInputCapture(app.globalInputHandler)
 
 	return app, nil
 }
@@ -114,6 +120,7 @@ func (a *App) Run() error {
 	a.navigate(a.nav.Current())
 
 	a.tviewApp.SetRoot(a.layout, true)
+	a.tviewApp.EnableMouse(false)
 	return a.tviewApp.Run()
 }
 
@@ -190,12 +197,30 @@ func (a *App) navigate(route navigation.Route) {
 	a.header.SetResource(route.String())
 	a.header.SetShortcuts(view.Shortcuts())
 	a.omnibox.SetFields(view.FilterFields())
+	a.omnibox.SetStatus(fmt.Sprintf("[yellow]Loading %s...", route.String()))
 
-	// Refresh data in background
+	// Show a loading placeholder immediately
+	loading := tview.NewTextView()
+	loading.SetTextAlign(tview.AlignCenter)
+	loading.SetDynamicColors(true)
+	loading.SetText(fmt.Sprintf("\n\n\n[yellow]Loading %s...\n\n[gray]Press Esc to cancel, Ctrl+C to quit", route.String()))
+	a.pages.RemovePage("current")
+	a.pages.AddAndSwitchToPage("current", loading, true)
+
+	// Refresh data in background with timeout
 	go func() {
-		err := view.Refresh(a.ctx)
+		timeoutCtx, timeoutCancel := context.WithTimeout(a.ctx, DefaultTimeout)
+		defer timeoutCancel()
+
+		err := view.Refresh(timeoutCtx)
 		if err != nil {
 			a.tviewApp.QueueUpdateDraw(func() {
+				errView := tview.NewTextView()
+				errView.SetTextAlign(tview.AlignCenter)
+				errView.SetDynamicColors(true)
+				errView.SetText(fmt.Sprintf("\n\n\n[red]Error loading %s:\n\n[white]%s\n\n[gray]Press Esc to go back, : to try another command", route.String(), err.Error()))
+				a.pages.RemovePage("current")
+				a.pages.AddAndSwitchToPage("current", errView, true)
 				a.omnibox.SetStatus(fmt.Sprintf("[red]Error: %s", err.Error()))
 			})
 			return
@@ -292,6 +317,12 @@ func (a *App) OnConfirm(confirmed bool) {
 
 // globalInputHandler handles application-wide key events.
 func (a *App) globalInputHandler(event *tcell.EventKey) *tcell.EventKey {
+	// Ctrl+C always quits - no matter what
+	if event.Key() == tcell.KeyCtrlC {
+		a.Stop()
+		return nil
+	}
+
 	// If omnibox is active, let it handle input
 	if a.omnibox.Mode() != components.OmniboxModeIdle {
 		switch event.Key() {
