@@ -34,10 +34,10 @@ type OmniboxHandler interface {
 }
 
 // Omnibox is the bottom bar that handles commands, filtering, and status.
+// It uses a single InputField that's always rendered in the widget tree,
+// switching between a read-only status display and an editable input mode.
 type Omnibox struct {
-	*tview.Pages
-	input       *tview.InputField
-	status      *tview.TextView
+	*tview.InputField
 	mode        OmniboxMode
 	handler     OmniboxHandler
 	suggestions []FilterSuggestion
@@ -48,27 +48,15 @@ type Omnibox struct {
 // NewOmnibox creates a new omnibox component.
 func NewOmnibox() *Omnibox {
 	input := tview.NewInputField()
+	input.SetBackgroundColor(tcell.ColorDarkSlateGray)
 	input.SetFieldBackgroundColor(tcell.ColorDarkSlateGray)
 	input.SetFieldTextColor(tcell.ColorWhite)
-	input.SetLabelColor(tcell.ColorDodgerBlue)
-	input.SetPlaceholderTextColor(tcell.ColorGray)
-	input.SetBackgroundColor(tcell.ColorDarkSlateGray)
-	input.SetPlaceholder("Press : for commands, / for filter")
-
-	status := tview.NewTextView()
-	status.SetDynamicColors(true)
-	status.SetBackgroundColor(tcell.ColorDarkSlateGray)
-	status.SetTextColor(tcell.ColorWhite)
-
-	pages := tview.NewPages()
-	pages.AddPage("status", status, true, true)
-	pages.AddPage("input", input, true, false)
+	input.SetLabelColor(tcell.ColorGray)
+	input.SetPlaceholderTextColor(tcell.ColorDarkGray)
 
 	o := &Omnibox{
-		Pages:  pages,
-		input:  input,
-		status: status,
-		mode:   OmniboxModeIdle,
+		InputField: input,
+		mode:       OmniboxModeIdle,
 		allFields: []string{
 			"instance_id", "name", "state", "type", "private_ip",
 			"public_ip", "vpc_id", "subnet_id", "security_group",
@@ -88,7 +76,13 @@ func (o *Omnibox) SetHandler(handler OmniboxHandler) {
 // SetStatus updates the status text shown when idle.
 func (o *Omnibox) SetStatus(text string) {
 	o.statusText = text
-	o.status.SetText(fmt.Sprintf("[gray]%s", text))
+	if o.mode == OmniboxModeIdle {
+		o.InputField.SetLabel(fmt.Sprintf(" [gray]%s", text))
+		o.InputField.SetText("")
+		o.InputField.SetFieldWidth(0)
+		o.InputField.SetPlaceholder("")
+		o.InputField.SetAutocompleteFunc(nil)
+	}
 }
 
 // SetFields sets the available filter fields for autocomplete.
@@ -99,31 +93,34 @@ func (o *Omnibox) SetFields(fields []string) {
 // Activate switches the omnibox to input mode.
 func (o *Omnibox) Activate(mode OmniboxMode) {
 	o.mode = mode
-	o.input.SetText("")
+	o.InputField.SetText("")
+	o.InputField.SetFieldWidth(0) // 0 = fill available space
 
 	switch mode {
 	case OmniboxModeCommand:
-		o.input.SetLabel("[dodgerblue]:[white] ")
-		o.input.SetPlaceholder("ec2, ecr, services, region=us-east-1, quit")
-		o.input.SetAutocompleteFunc(o.commandAutocomplete)
+		o.InputField.SetLabel("[dodgerblue::b]: [-::-]")
+		o.InputField.SetPlaceholder("ec2, ecr, services, region=us-east-1, quit")
+		o.InputField.SetAutocompleteFunc(o.commandAutocomplete)
 	case OmniboxModeFilter:
-		o.input.SetLabel("[dodgerblue]/[white] ")
-		o.input.SetPlaceholder("name contains web, state = running, ...")
-		o.input.SetAutocompleteFunc(o.filterAutocomplete)
+		o.InputField.SetLabel("[dodgerblue::b]/ [-::-]")
+		o.InputField.SetPlaceholder("name contains web, state = running, ...")
+		o.InputField.SetAutocompleteFunc(o.filterAutocomplete)
 	case OmniboxModeConfirm:
-		o.input.SetLabel("[red]Confirm (y/N):[white] ")
-		o.input.SetPlaceholder("")
-		o.input.SetAutocompleteFunc(nil)
+		o.InputField.SetLabel("[red::b]Confirm (y/N): [-::-]")
+		o.InputField.SetPlaceholder("")
+		o.InputField.SetAutocompleteFunc(nil)
 	}
-
-	o.Pages.SwitchToPage("input")
 }
 
 // Deactivate returns the omnibox to idle mode.
 func (o *Omnibox) Deactivate() {
 	o.mode = OmniboxModeIdle
-	o.input.SetText("")
-	o.Pages.SwitchToPage("status")
+	o.InputField.SetText("")
+	o.InputField.SetAutocompleteFunc(nil)
+	o.InputField.SetPlaceholder("")
+	// Restore status display
+	o.InputField.SetLabel(fmt.Sprintf(" [gray]%s", o.statusText))
+	o.InputField.SetFieldWidth(0)
 }
 
 // Mode returns the current omnibox mode.
@@ -133,12 +130,12 @@ func (o *Omnibox) Mode() OmniboxMode {
 
 // Input returns the input field for focus management.
 func (o *Omnibox) Input() *tview.InputField {
-	return o.input
+	return o.InputField
 }
 
 // HandleInput processes the current input when Enter is pressed.
 func (o *Omnibox) HandleInput() {
-	text := strings.TrimSpace(o.input.GetText())
+	text := strings.TrimSpace(o.InputField.GetText())
 	if text == "" {
 		o.Deactivate()
 		return
@@ -166,7 +163,7 @@ func (o *Omnibox) HandleInput() {
 // SetConfirmPrompt sets the omnibox to confirmation mode with a custom prompt.
 func (o *Omnibox) SetConfirmPrompt(prompt string) {
 	o.Activate(OmniboxModeConfirm)
-	o.input.SetLabel(fmt.Sprintf("[red]%s (y/N):[white] ", prompt))
+	o.InputField.SetLabel(fmt.Sprintf("[red::b]%s (y/N): [-::-]", prompt))
 }
 
 // commandAutocomplete provides autocomplete for commands.
