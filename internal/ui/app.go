@@ -1,0 +1,368 @@
+// Package ui provides the TUI application shell for awsc.
+package ui
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
+	awsclient "github.com/tpriestnall/awsc/internal/aws"
+	"github.com/tpriestnall/awsc/internal/aws/ec2"
+	"github.com/tpriestnall/awsc/internal/aws/ecr"
+	"github.com/tpriestnall/awsc/internal/config"
+	"github.com/tpriestnall/awsc/internal/navigation"
+	"github.com/tpriestnall/awsc/internal/ui/components"
+)
+
+// View is the interface that all resource views must implement.
+type View interface {
+	// Name returns the view identifier.
+	Name() string
+	// Render returns the tview.Primitive to display.
+	Render() tview.Primitive
+	// Refresh reloads data from AWS.
+	Refresh(ctx context.Context) error
+	// Shortcuts returns the context-specific shortcuts for this view.
+	Shortcuts() []components.Shortcut
+	// FilterFields returns the available filter fields for this view.
+	FilterFields() []string
+	// HandleFilter applies a filter expression.
+	HandleFilter(expression string)
+}
+
+// App is the main TUI application.
+type App struct {
+	tviewApp *tview.Application
+	pages    *tview.Pages
+	header   *components.Header
+	omnibox  *components.Omnibox
+	layout   *tview.Flex
+
+	// Core state
+	config    *config.AppConfig
+	client    *awsclient.Client
+	nav       *navigation.Stack
+	commands  *navigation.CommandRegistry
+
+	// Services
+	ec2Service *ec2.Service
+	ecrService *ecr.Service
+
+	// Views
+	views       map[string]View
+	currentView View
+
+	// Context
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// NewApp creates a new application instance.
+func NewApp(cfg *config.AppConfig) (*App, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	client, err := awsclient.NewClient(ctx, cfg.Profile, cfg.Region)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("creating AWS client: %w", err)
+	}
+
+	app := &App{
+		tviewApp: tview.NewApplication(),
+		pages:    tview.NewPages(),
+		header:   components.NewHeader(),
+		omnibox:  components.NewOmnibox(),
+		config:   cfg,
+		client:   client,
+		nav:      navigation.NewStack(),
+		commands: navigation.NewCommandRegistry(),
+		views:    make(map[string]View),
+		ctx:      ctx,
+		cancel:   cancel,
+	}
+
+	// Initialize services
+	awsCfg := client.Config()
+	app.ec2Service = ec2.NewService(awsCfg)
+	app.ecrService = ecr.NewService(awsCfg)
+
+	// Set up header context
+	app.header.SetContext(cfg.Profile, cfg.Region)
+
+	// Set up omnibox handler
+	app.omnibox.SetHandler(app)
+
+	// Build layout
+	app.layout = tview.NewFlex().SetDirection(tview.FlexRow)
+	app.layout.AddItem(app.header, 1, 0, false)
+	app.layout.AddItem(app.pages, 0, 1, true)
+	app.layout.AddItem(app.omnibox, 1, 0, false)
+
+	// Set up global input handling
+	app.tviewApp.SetInputCapture(app.globalInputHandler)
+
+	return app, nil
+}
+
+// Run starts the TUI application.
+func (a *App) Run() error {
+	defer a.cancel()
+
+	// Navigate to initial route
+	a.navigate(a.nav.Current())
+
+	a.tviewApp.SetRoot(a.layout, true)
+	return a.tviewApp.Run()
+}
+
+// Stop cleanly shuts down the application.
+func (a *App) Stop() {
+	a.cancel()
+	a.tviewApp.Stop()
+}
+
+// RegisterView adds a view to the application.
+func (a *App) RegisterView(view View) {
+	a.views[view.Name()] = view
+}
+
+// EC2Service returns the EC2 service instance.
+func (a *App) EC2Service() *ec2.Service {
+	return a.ec2Service
+}
+
+// ECRService returns the ECR service instance.
+func (a *App) ECRService() *ecr.Service {
+	return a.ecrService
+}
+
+// Navigate pushes a new route and renders the corresponding view.
+func (a *App) Navigate(route navigation.Route) {
+	a.nav.Push(route)
+	a.navigate(route)
+}
+
+// NavigateBack goes back in history.
+func (a *App) NavigateBack() {
+	if a.nav.Back() {
+		a.navigate(a.nav.Current())
+	}
+}
+
+// TviewApp returns the underlying tview application (for views that need it).
+func (a *App) TviewApp() *tview.Application {
+	return a.tviewApp
+}
+
+// Context returns the application context.
+func (a *App) Context() context.Context {
+	return a.ctx
+}
+
+// Config returns the application config.
+func (a *App) Config() *config.AppConfig {
+	return a.config
+}
+
+// ShowConfirm activates the omnibox in confirm mode.
+func (a *App) ShowConfirm(prompt string) {
+	a.omnibox.SetConfirmPrompt(prompt)
+	a.tviewApp.SetFocus(a.omnibox.Input())
+}
+
+// SetStatus updates the omnibox status text.
+func (a *App) SetStatus(text string) {
+	a.omnibox.SetStatus(text)
+}
+
+// navigate renders the view for the given route.
+func (a *App) navigate(route navigation.Route) {
+	viewName := route.Resource
+	view, ok := a.views[viewName]
+	if !ok {
+		a.omnibox.SetStatus(fmt.Sprintf("[red]Unknown resource: %s", viewName))
+		return
+	}
+
+	a.currentView = view
+	a.header.SetResource(route.String())
+	a.header.SetShortcuts(view.Shortcuts())
+	a.omnibox.SetFields(view.FilterFields())
+
+	// Refresh data in background
+	go func() {
+		err := view.Refresh(a.ctx)
+		if err != nil {
+			a.tviewApp.QueueUpdateDraw(func() {
+				a.omnibox.SetStatus(fmt.Sprintf("[red]Error: %s", err.Error()))
+			})
+			return
+		}
+		a.tviewApp.QueueUpdateDraw(func() {
+			a.pages.RemovePage("current")
+			a.pages.AddAndSwitchToPage("current", view.Render(), true)
+			a.omnibox.SetStatus(fmt.Sprintf("[green]%s loaded", route.String()))
+		})
+	}()
+}
+
+// OnCommand handles command input from the omnibox.
+func (a *App) OnCommand(command string) {
+	// Handle special commands
+	if command == "quit" || command == "q" {
+		a.Stop()
+		return
+	}
+
+	// Handle region= commands
+	if strings.HasPrefix(command, "region=") {
+		region := strings.TrimPrefix(command, "region=")
+		err := a.config.SetRegion(region)
+		if err != nil {
+			a.omnibox.SetStatus(fmt.Sprintf("[red]%s", err.Error()))
+			return
+		}
+		// Reload AWS client with new region
+		err = a.client.SetRegion(a.ctx, region)
+		if err != nil {
+			a.omnibox.SetStatus(fmt.Sprintf("[red]Failed to set region: %s", err.Error()))
+			return
+		}
+		a.ec2Service = ec2.NewService(a.client.Config())
+		a.ecrService = ecr.NewService(a.client.Config())
+		a.header.SetContext(a.config.Profile, a.config.Region)
+		a.omnibox.SetStatus(fmt.Sprintf("[green]Region set to %s", region))
+		// Refresh current view
+		if a.currentView != nil {
+			a.navigate(a.nav.Current())
+		}
+		return
+	}
+
+	// Handle region command (show picker)
+	if command == "region" {
+		a.showRegionPicker()
+		return
+	}
+
+	// Handle profile= commands
+	if strings.HasPrefix(command, "profile=") {
+		profile := strings.TrimPrefix(command, "profile=")
+		err := a.client.SetProfile(a.ctx, profile)
+		if err != nil {
+			a.omnibox.SetStatus(fmt.Sprintf("[red]Failed to set profile: %s", err.Error()))
+			return
+		}
+		a.config.SetProfile(profile)
+		a.ec2Service = ec2.NewService(a.client.Config())
+		a.ecrService = ecr.NewService(a.client.Config())
+		a.header.SetContext(a.config.Profile, a.config.Region)
+		a.omnibox.SetStatus(fmt.Sprintf("[green]Profile set to %s", profile))
+		if a.currentView != nil {
+			a.navigate(a.nav.Current())
+		}
+		return
+	}
+
+	// Try to resolve as a navigation command
+	route, ok := a.commands.Resolve(command)
+	if ok {
+		a.Navigate(route)
+		return
+	}
+
+	a.omnibox.SetStatus(fmt.Sprintf("[red]Unknown command: %s", command))
+}
+
+// OnFilter handles filter input from the omnibox.
+func (a *App) OnFilter(filter string) {
+	if a.currentView != nil {
+		a.currentView.HandleFilter(filter)
+		a.omnibox.SetStatus(fmt.Sprintf("[yellow]Filter: %s", filter))
+	}
+}
+
+// OnConfirm handles confirmation input from the omnibox.
+func (a *App) OnConfirm(confirmed bool) {
+	// Views will handle this via their own state
+	_ = confirmed
+}
+
+// globalInputHandler handles application-wide key events.
+func (a *App) globalInputHandler(event *tcell.EventKey) *tcell.EventKey {
+	// If omnibox is active, let it handle input
+	if a.omnibox.Mode() != components.OmniboxModeIdle {
+		switch event.Key() {
+		case tcell.KeyEscape:
+			a.omnibox.Deactivate()
+			a.tviewApp.SetFocus(a.pages)
+			return nil
+		case tcell.KeyEnter:
+			a.omnibox.HandleInput()
+			a.tviewApp.SetFocus(a.pages)
+			return nil
+		}
+		return event
+	}
+
+	// Global shortcuts
+	switch event.Key() {
+	case tcell.KeyEscape:
+		a.NavigateBack()
+		return nil
+	}
+
+	switch event.Rune() {
+	case ':':
+		a.omnibox.Activate(components.OmniboxModeCommand)
+		a.tviewApp.SetFocus(a.omnibox.Input())
+		return nil
+	case '/':
+		a.omnibox.Activate(components.OmniboxModeFilter)
+		a.tviewApp.SetFocus(a.omnibox.Input())
+		return nil
+	case 'q':
+		a.Stop()
+		return nil
+	}
+
+	return event
+}
+
+// showRegionPicker displays a region selection modal.
+func (a *App) showRegionPicker() {
+	list := tview.NewList()
+	list.SetTitle(" Select Region ")
+	list.SetBorder(true)
+	list.SetBorderColor(tcell.ColorDodgerBlue)
+
+	for _, region := range config.AWSRegions {
+		r := region // capture
+		list.AddItem(r, "", 0, func() {
+			a.pages.RemovePage("region-picker")
+			a.OnCommand("region=" + r)
+		})
+	}
+
+	list.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEscape {
+			a.pages.RemovePage("region-picker")
+			return nil
+		}
+		return event
+	})
+
+	// Center the list
+	modal := tview.NewFlex().
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(nil, 0, 1, false).
+			AddItem(list, 20, 0, true).
+			AddItem(nil, 0, 1, false), 40, 0, true).
+		AddItem(nil, 0, 1, false)
+
+	a.pages.AddAndSwitchToPage("region-picker", modal, true)
+	a.tviewApp.SetFocus(list)
+}
