@@ -323,19 +323,25 @@ func (a *App) globalInputHandler(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	}
 
-	// If omnibox is active, let it handle input
+	// If omnibox is active, route input directly to the InputField.
+	// We bypass tview's focus-routing entirely because it doesn't reliably
+	// deliver keystrokes to newly-focused widgets within the same frame.
 	if a.omnibox.Mode() != components.OmniboxModeIdle {
 		switch event.Key() {
 		case tcell.KeyEscape:
 			a.omnibox.Deactivate()
-			a.tviewApp.SetFocus(a.pages)
 			return nil
 		case tcell.KeyEnter:
 			a.omnibox.HandleInput()
-			a.tviewApp.SetFocus(a.pages)
+			return nil
+		default:
+			// Directly invoke the InputField's input handler.
+			handler := a.omnibox.Input().InputHandler()
+			if handler != nil {
+				handler(event, func(p tview.Primitive) {})
+			}
 			return nil
 		}
-		return event
 	}
 
 	// Global shortcuts
@@ -348,11 +354,9 @@ func (a *App) globalInputHandler(event *tcell.EventKey) *tcell.EventKey {
 	switch event.Rune() {
 	case ':':
 		a.omnibox.Activate(components.OmniboxModeCommand)
-		a.tviewApp.SetFocus(a.omnibox.Input())
 		return nil
 	case '/':
 		a.omnibox.Activate(components.OmniboxModeFilter)
-		a.tviewApp.SetFocus(a.omnibox.Input())
 		return nil
 	case 'q':
 		a.Stop()
