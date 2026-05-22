@@ -35,7 +35,7 @@ type OmniboxHandler interface {
 
 // Omnibox is the bottom bar that handles commands, filtering, and status.
 type Omnibox struct {
-	*tview.Flex
+	*tview.Pages
 	input       *tview.InputField
 	status      *tview.TextView
 	mode        OmniboxMode
@@ -50,7 +50,9 @@ func NewOmnibox() *Omnibox {
 	input := tview.NewInputField()
 	input.SetFieldBackgroundColor(tcell.ColorDarkSlateGray)
 	input.SetFieldTextColor(tcell.ColorWhite)
+	input.SetLabelColor(tcell.ColorDodgerBlue)
 	input.SetPlaceholderTextColor(tcell.ColorGray)
+	input.SetBackgroundColor(tcell.ColorDarkSlateGray)
 	input.SetPlaceholder("Press : for commands, / for filter")
 
 	status := tview.NewTextView()
@@ -58,12 +60,12 @@ func NewOmnibox() *Omnibox {
 	status.SetBackgroundColor(tcell.ColorDarkSlateGray)
 	status.SetTextColor(tcell.ColorWhite)
 
-	flex := tview.NewFlex()
-	flex.SetDirection(tview.FlexColumn)
-	flex.AddItem(status, 0, 1, false)
+	pages := tview.NewPages()
+	pages.AddPage("status", status, true, true)
+	pages.AddPage("input", input, true, false)
 
 	o := &Omnibox{
-		Flex:   flex,
+		Pages:  pages,
 		input:  input,
 		status: status,
 		mode:   OmniboxModeIdle,
@@ -97,34 +99,31 @@ func (o *Omnibox) SetFields(fields []string) {
 // Activate switches the omnibox to input mode.
 func (o *Omnibox) Activate(mode OmniboxMode) {
 	o.mode = mode
-	o.Flex.Clear()
-	o.Flex.AddItem(o.input, 0, 1, true)
+	o.input.SetText("")
 
 	switch mode {
 	case OmniboxModeCommand:
 		o.input.SetLabel("[dodgerblue]:[white] ")
 		o.input.SetPlaceholder("ec2, ecr, services, region=us-east-1, quit")
-		o.input.SetText("")
 		o.input.SetAutocompleteFunc(o.commandAutocomplete)
 	case OmniboxModeFilter:
 		o.input.SetLabel("[dodgerblue]/[white] ")
 		o.input.SetPlaceholder("name contains web, state = running, ...")
-		o.input.SetText("")
 		o.input.SetAutocompleteFunc(o.filterAutocomplete)
 	case OmniboxModeConfirm:
 		o.input.SetLabel("[red]Confirm (y/N):[white] ")
 		o.input.SetPlaceholder("")
-		o.input.SetText("")
 		o.input.SetAutocompleteFunc(nil)
 	}
+
+	o.Pages.SwitchToPage("input")
 }
 
 // Deactivate returns the omnibox to idle mode.
 func (o *Omnibox) Deactivate() {
 	o.mode = OmniboxModeIdle
-	o.Flex.Clear()
-	o.Flex.AddItem(o.status, 0, 1, false)
 	o.input.SetText("")
+	o.Pages.SwitchToPage("status")
 }
 
 // Mode returns the current omnibox mode.
