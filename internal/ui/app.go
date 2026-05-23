@@ -205,6 +205,8 @@ func IsAuthError(err error) bool {
 		strings.Contains(msg, "ExpiredToken") ||
 		strings.Contains(msg, "InvalidIdentityToken") ||
 		strings.Contains(msg, "expired") ||
+		strings.Contains(msg, "RequestExpired") ||
+		strings.Contains(msg, "Request has expired") ||
 		strings.Contains(msg, "security token included in the request is expired") ||
 		strings.Contains(msg, "UnauthorizedAccess") ||
 		strings.Contains(msg, "The SSO session associated with this profile has expired")
