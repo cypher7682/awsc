@@ -112,7 +112,7 @@ func (o *Omnibox) Activate(mode OmniboxMode) {
 	switch mode {
 	case OmniboxModeCommand:
 		o.InputField.SetLabel("[dodgerblue::b]: [-::-]")
-		o.InputField.SetPlaceholder("ec2, ecr, services, region=us-east-1, quit")
+		o.InputField.SetPlaceholder("ec2, ecr, services, r=eu-west-1, p=nexmo-dev, quit")
 	case OmniboxModeFilter:
 		o.InputField.SetLabel("[dodgerblue::b]/ [-::-]")
 		o.InputField.SetPlaceholder("name contains web, state = running, ...")
@@ -180,7 +180,7 @@ func (o *Omnibox) SetConfirmPrompt(prompt string) {
 }
 
 // GetCompletions returns the popup completion items for the current text.
-// Returns non-nil only for profile= and region= prefixes (where a popup makes sense).
+// Returns non-nil only for profile=/p= and region=/r= prefixes (where a popup makes sense).
 func (o *Omnibox) GetCompletions(currentText string) []string {
 	if currentText == "" {
 		return nil
@@ -188,26 +188,42 @@ func (o *Omnibox) GetCompletions(currentText string) []string {
 
 	lower := strings.ToLower(currentText)
 
-	// Profile completions
+	// Profile completions (full or shorthand)
+	var profilePrefix string
+	var profileLabel string
 	if strings.HasPrefix(lower, "profile=") {
-		prefix := strings.TrimPrefix(lower, "profile=")
+		profilePrefix = strings.TrimPrefix(lower, "profile=")
+		profileLabel = "profile="
+	} else if strings.HasPrefix(lower, "p=") {
+		profilePrefix = strings.TrimPrefix(lower, "p=")
+		profileLabel = "p="
+	}
+	if profileLabel != "" {
 		var matches []string
 		for _, p := range o.profiles {
-			if prefix == "" || strings.Contains(strings.ToLower(p), prefix) {
-				matches = append(matches, "profile="+p)
+			if profilePrefix == "" || strings.Contains(strings.ToLower(p), profilePrefix) {
+				matches = append(matches, profileLabel+p)
 			}
 		}
 		sort.Strings(matches)
 		return matches
 	}
 
-	// Region completions
+	// Region completions (full or shorthand)
+	var regionPrefix string
+	var regionLabel string
 	if strings.HasPrefix(lower, "region=") {
-		prefix := strings.TrimPrefix(lower, "region=")
+		regionPrefix = strings.TrimPrefix(lower, "region=")
+		regionLabel = "region="
+	} else if strings.HasPrefix(lower, "r=") {
+		regionPrefix = strings.TrimPrefix(lower, "r=")
+		regionLabel = "r="
+	}
+	if regionLabel != "" {
 		var matches []string
 		for _, r := range o.regions {
-			if prefix == "" || strings.Contains(r, prefix) {
-				matches = append(matches, "region="+r)
+			if regionPrefix == "" || strings.Contains(r, regionPrefix) {
+				matches = append(matches, regionLabel+r)
 			}
 		}
 		sort.Strings(matches)
@@ -225,26 +241,42 @@ func (o *Omnibox) commandAutocomplete(currentText string) []string {
 
 	lower := strings.ToLower(currentText)
 
-	// If user is typing "profile=...", suggest profiles
+	// If user is typing "profile=..." or "p=...", suggest profiles
+	var profilePrefix string
+	var profileLabel string
 	if strings.HasPrefix(lower, "profile=") {
-		prefix := strings.TrimPrefix(lower, "profile=")
+		profilePrefix = strings.TrimPrefix(lower, "profile=")
+		profileLabel = "profile="
+	} else if strings.HasPrefix(lower, "p=") {
+		profilePrefix = strings.TrimPrefix(lower, "p=")
+		profileLabel = "p="
+	}
+	if profileLabel != "" {
 		var matches []string
 		for _, p := range o.profiles {
-			if prefix == "" || strings.HasPrefix(strings.ToLower(p), prefix) {
-				matches = append(matches, "profile="+p)
+			if profilePrefix == "" || strings.HasPrefix(strings.ToLower(p), profilePrefix) {
+				matches = append(matches, profileLabel+p)
 			}
 		}
 		sort.Strings(matches)
 		return matches
 	}
 
-	// If user is typing "region=...", suggest regions
+	// If user is typing "region=..." or "r=...", suggest regions
+	var regionPrefix string
+	var regionLabel string
 	if strings.HasPrefix(lower, "region=") {
-		prefix := strings.TrimPrefix(lower, "region=")
+		regionPrefix = strings.TrimPrefix(lower, "region=")
+		regionLabel = "region="
+	} else if strings.HasPrefix(lower, "r=") {
+		regionPrefix = strings.TrimPrefix(lower, "r=")
+		regionLabel = "r="
+	}
+	if regionLabel != "" {
 		var matches []string
 		for _, r := range o.regions {
-			if prefix == "" || strings.HasPrefix(r, prefix) {
-				matches = append(matches, "region="+r)
+			if regionPrefix == "" || strings.HasPrefix(r, regionPrefix) {
+				matches = append(matches, regionLabel+r)
 			}
 		}
 		sort.Strings(matches)
@@ -264,12 +296,18 @@ func (o *Omnibox) commandAutocomplete(currentText string) []string {
 		}
 	}
 
-	// Also suggest "profile=" and "region=" if partially matched
+	// Also suggest "profile=", "p=", "region=", "r=" if partially matched
 	if strings.HasPrefix("profile=", lower) && lower != "profile=" {
 		matches = append(matches, "profile=")
 	}
+	if strings.HasPrefix("p=", lower) && lower != "p=" {
+		matches = append(matches, "p=")
+	}
 	if strings.HasPrefix("region=", lower) && lower != "region=" {
 		matches = append(matches, "region=")
+	}
+	if strings.HasPrefix("r=", lower) && lower != "r=" {
+		matches = append(matches, "r=")
 	}
 
 	sort.Strings(matches)

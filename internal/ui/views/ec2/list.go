@@ -25,6 +25,7 @@ type Navigator interface {
 	Context() context.Context
 	ShowConfirm(prompt string, onConfirm func())
 	SetStatus(text string)
+	HandleAuthError(err error) bool
 }
 
 // ec2Columns defines the column layout for the EC2 table.

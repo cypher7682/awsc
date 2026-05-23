@@ -4,6 +4,8 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -52,7 +54,7 @@ type App struct {
 
 	// Core state
 	config   *config.AppConfig
-	client   *awsclient.Client
+	session  *awsclient.Session
 	nav      *navigation.Stack
 	commands *navigation.CommandRegistry
 
@@ -78,10 +80,10 @@ type App struct {
 func NewApp(cfg *config.AppConfig) (*App, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	client, err := awsclient.NewClient(ctx, cfg.Profile, cfg.Region)
+	session, err := awsclient.NewSession(ctx, cfg.Profile, cfg.Region)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("creating AWS client: %w", err)
+		return nil, fmt.Errorf("creating AWS session: %w", err)
 	}
 
 	tviewApp := tview.NewApplication()
@@ -93,7 +95,7 @@ func NewApp(cfg *config.AppConfig) (*App, error) {
 		omnibox:    components.NewOmnibox(),
 		completion: components.NewCompletionList(),
 		config:     cfg,
-		client:     client,
+		session:    session,
 		nav:        navigation.NewStack(),
 		commands:   navigation.NewCommandRegistry(),
 		views:      make(map[string]View),
@@ -102,11 +104,8 @@ func NewApp(cfg *config.AppConfig) (*App, error) {
 		cancel:     cancel,
 	}
 
-	// Initialize services
-	awsCfg := client.Config()
-	app.ec2Service = ec2.NewService(awsCfg)
-	app.ecrService = ecr.NewService(awsCfg)
-	app.cwService = cloudwatch.NewService(awsCfg)
+	// Initialize services from session
+	app.rebuildServices()
 
 	// Set up header context
 	app.header.SetContext(cfg.Profile, cfg.Region)
@@ -194,6 +193,84 @@ func (a *App) CloudWatchService() *cloudwatch.Service {
 	return a.cwService
 }
 
+// IsAuthError returns true if the error indicates expired/missing credentials.
+func IsAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "get credentials") ||
+		strings.Contains(msg, "no EC2 IMDS role found") ||
+		strings.Contains(msg, "failed to refresh cached credentials") ||
+		strings.Contains(msg, "ExpiredToken") ||
+		strings.Contains(msg, "InvalidIdentityToken") ||
+		strings.Contains(msg, "expired") ||
+		strings.Contains(msg, "security token included in the request is expired") ||
+		strings.Contains(msg, "UnauthorizedAccess") ||
+		strings.Contains(msg, "The SSO session associated with this profile has expired")
+}
+
+// RunLoginCmd suspends the TUI, runs the configured login_cmd, and resumes.
+// Returns true if the command was run (regardless of its exit code).
+// Returns false if no login_cmd is configured.
+func (a *App) RunLoginCmd() bool {
+	userCfg := a.config.User
+	if !userCfg.HasLoginCmd() {
+		return false
+	}
+
+	cmdStr := userCfg.ResolveLoginCmd(a.config.Profile, a.config.Region)
+
+	a.tviewApp.Suspend(func() {
+		fmt.Fprintf(os.Stderr, "\n[awsc] Running login command: %s\n\n", cmdStr)
+
+		cmd := exec.Command("sh", "-c", cmdStr)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "\n[awsc] Login command failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "[awsc] Press Enter to return to awsc...")
+			bufio := make([]byte, 1)
+			os.Stdin.Read(bufio)
+		} else {
+			fmt.Fprintf(os.Stderr, "\n[awsc] Login successful. Resuming...\n")
+			time.Sleep(500 * time.Millisecond)
+		}
+	})
+
+	// Reinitialise AWS clients with (hopefully) fresh credentials
+	if err := a.session.Reload(a.ctx); err != nil {
+		a.omnibox.SetStatus(fmt.Sprintf("[red]Session reload failed: %s", err.Error()))
+	}
+	a.rebuildServices()
+
+	return true
+}
+
+// HandleAuthError checks if an error is an auth failure. If a login_cmd is
+// configured, it offers to run it. Returns true if login was attempted (caller
+// should retry the operation).
+func (a *App) HandleAuthError(err error) bool {
+	if !IsAuthError(err) {
+		return false
+	}
+	if !a.config.User.HasLoginCmd() {
+		return false
+	}
+
+	// Run login command immediately — the user expects it
+	return a.RunLoginCmd()
+}
+
+// rebuildServices recreates all service layers from the current session.
+func (a *App) rebuildServices() {
+	a.ec2Service = ec2.NewServiceFromClient(a.session.EC2Client())
+	a.ecrService = ecr.NewServiceFromClient(a.session.ECRClient())
+	a.cwService = cloudwatch.NewServiceFromClient(a.session.CloudWatchClient())
+}
+
 // Navigate pushes a new route and renders the corresponding view.
 func (a *App) Navigate(route navigation.Route) {
 	a.nav.Push(route)
@@ -274,15 +351,43 @@ func (a *App) navigate(route navigation.Route) {
 		defer timeoutCancel()
 
 		err := view.Refresh(timeoutCtx)
+		if err != nil && IsAuthError(err) && a.config.User.HasLoginCmd() {
+			// Auth failure with login_cmd configured — attempt auto-login
+			a.tviewApp.QueueUpdateDraw(func() {
+				a.omnibox.SetStatus("[yellow]Credentials expired. Running login command...")
+			})
+
+			// RunLoginCmd must be called from the main goroutine via QueueUpdate
+			// because Suspend requires the event loop. Use a channel to coordinate.
+			done := make(chan bool, 1)
+			a.tviewApp.QueueUpdate(func() {
+				result := a.RunLoginCmd()
+				done <- result
+			})
+			loginRan := <-done
+
+			if loginRan {
+				// Retry the refresh with fresh credentials
+				retryCtx, retryCancel := context.WithTimeout(a.ctx, DefaultTimeout)
+				defer retryCancel()
+				err = view.Refresh(retryCtx)
+			}
+		}
+
 		if err != nil {
 			a.tviewApp.QueueUpdateDraw(func() {
 				errView := tview.NewTextView()
 				errView.SetTextAlign(tview.AlignCenter)
 				errView.SetDynamicColors(true)
-				errView.SetText(fmt.Sprintf("\n\n\n[red]Error loading %s:\n\n[white]%s\n\n[gray]Press Esc to go back, : to try another command", route.String(), err.Error()))
+				errMsg := err.Error()
+				hint := "[gray]Press Esc to go back, : to try another command"
+				if IsAuthError(err) && !a.config.User.HasLoginCmd() {
+					hint = "[gray]Tip: configure login_cmd in ~/.config/awsc/config.yaml to auto-login"
+				}
+				errView.SetText(fmt.Sprintf("\n\n\n[red]Error loading %s:\n\n[white]%s\n\n%s", route.String(), errMsg, hint))
 				a.pages.RemovePage("current")
 				a.pages.AddAndSwitchToPage("current", errView, true)
-				a.omnibox.SetStatus(fmt.Sprintf("[red]Error: %s", err.Error()))
+				a.omnibox.SetStatus(fmt.Sprintf("[red]Error: %s", errMsg))
 			})
 			return
 		}
@@ -296,6 +401,13 @@ func (a *App) navigate(route navigation.Route) {
 
 // OnCommand handles command input from the omnibox.
 func (a *App) OnCommand(command string) {
+	// Expand shorthands: :r= -> region=, :p= -> profile=
+	if strings.HasPrefix(command, "r=") {
+		command = "region=" + strings.TrimPrefix(command, "r=")
+	} else if strings.HasPrefix(command, "p=") {
+		command = "profile=" + strings.TrimPrefix(command, "p=")
+	}
+
 	// Handle special commands
 	if command == "quit" || command == "q" {
 		a.Stop()
@@ -310,14 +422,13 @@ func (a *App) OnCommand(command string) {
 			a.omnibox.SetStatus(fmt.Sprintf("[red]%s", err.Error()))
 			return
 		}
-		// Reload AWS client with new region
-		err = a.client.SetRegion(a.ctx, region)
+		// Reload AWS session with new region
+		err = a.session.SetRegion(a.ctx, region)
 		if err != nil {
 			a.omnibox.SetStatus(fmt.Sprintf("[red]Failed to set region: %s", err.Error()))
 			return
 		}
-		a.ec2Service = ec2.NewService(a.client.Config())
-		a.ecrService = ecr.NewService(a.client.Config())
+		a.rebuildServices()
 		a.header.SetContext(a.config.Profile, a.config.Region)
 		a.omnibox.SetStatus(fmt.Sprintf("[green]Region set to %s", region))
 		// Refresh current view
@@ -328,7 +439,7 @@ func (a *App) OnCommand(command string) {
 	}
 
 	// Handle region command (show picker)
-	if command == "region" {
+	if command == "region" || command == "r" {
 		a.showRegionPicker()
 		return
 	}
@@ -336,14 +447,13 @@ func (a *App) OnCommand(command string) {
 	// Handle profile= commands
 	if strings.HasPrefix(command, "profile=") {
 		profile := strings.TrimPrefix(command, "profile=")
-		err := a.client.SetProfile(a.ctx, profile)
+		err := a.session.SetProfile(a.ctx, profile)
 		if err != nil {
 			a.omnibox.SetStatus(fmt.Sprintf("[red]Failed to set profile: %s", err.Error()))
 			return
 		}
 		a.config.SetProfile(profile)
-		a.ec2Service = ec2.NewService(a.client.Config())
-		a.ecrService = ecr.NewService(a.client.Config())
+		a.rebuildServices()
 		a.header.SetContext(a.config.Profile, a.config.Region)
 		a.omnibox.SetStatus(fmt.Sprintf("[green]Profile set to %s", profile))
 		if a.currentView != nil {

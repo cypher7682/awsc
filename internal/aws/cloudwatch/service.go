@@ -88,6 +88,11 @@ func NewService(cfg aws.Config) *Service {
 	}
 }
 
+// NewServiceFromClient creates a new CloudWatch service from a pre-built SDK client.
+func NewServiceFromClient(client *cloudwatch.Client) *Service {
+	return &Service{client: client}
+}
+
 // NewServiceWithClient creates a new service with a custom client (for testing).
 func NewServiceWithClient(client CloudWatchAPI) *Service {
 	return &Service{client: client}

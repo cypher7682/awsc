@@ -98,6 +98,11 @@ func NewService(cfg aws.Config) *Service {
 	}
 }
 
+// NewServiceFromClient creates a new EC2 service from a pre-built SDK client.
+func NewServiceFromClient(client *ec2.Client) *Service {
+	return &Service{client: client}
+}
+
 // NewServiceWithClient creates a new EC2 service with a custom client (for testing).
 func NewServiceWithClient(client EC2API) *Service {
 	return &Service{client: client}

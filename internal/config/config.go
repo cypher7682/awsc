@@ -11,6 +11,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"gopkg.in/yaml.v3"
 )
 
 // AWSRegions contains all available AWS regions.
@@ -47,6 +48,60 @@ var AWSRegions = []string{
 type AppConfig struct {
 	Profile string
 	Region  string
+	User    *UserConfig
+}
+
+// UserConfig represents the user's ~/.config/awsc/config.yaml settings.
+type UserConfig struct {
+	// LoginCmd is a shell command to run when credentials are expired/missing.
+	// Supports placeholders: #PROFILE and #REGION which are substituted at runtime.
+	// Example: "aws sso login --profile #PROFILE"
+	LoginCmd string `yaml:"login_cmd"`
+}
+
+// DefaultConfigPath returns the path to ~/.config/awsc/config.yaml.
+func DefaultConfigPath() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(homeDir, ".config", "awsc", "config.yaml")
+}
+
+// LoadUserConfig reads and parses the user config file.
+// Returns an empty UserConfig (not nil) if the file doesn't exist.
+func LoadUserConfig() *UserConfig {
+	path := DefaultConfigPath()
+	if path == "" {
+		return &UserConfig{}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return &UserConfig{}
+	}
+
+	var uc UserConfig
+	if err := yaml.Unmarshal(data, &uc); err != nil {
+		return &UserConfig{}
+	}
+	return &uc
+}
+
+// ResolveLoginCmd substitutes #PROFILE and #REGION placeholders in the login command.
+func (uc *UserConfig) ResolveLoginCmd(profile, region string) string {
+	if uc == nil || uc.LoginCmd == "" {
+		return ""
+	}
+	cmd := uc.LoginCmd
+	cmd = strings.ReplaceAll(cmd, "#PROFILE", profile)
+	cmd = strings.ReplaceAll(cmd, "#REGION", region)
+	return cmd
+}
+
+// HasLoginCmd returns true if a login command is configured.
+func (uc *UserConfig) HasLoginCmd() bool {
+	return uc != nil && uc.LoginCmd != ""
 }
 
 // NewAppConfig creates a new AppConfig with defaults from environment or flags.
@@ -69,6 +124,7 @@ func NewAppConfig(profile, region string) *AppConfig {
 	return &AppConfig{
 		Profile: profile,
 		Region:  region,
+		User:    LoadUserConfig(),
 	}
 }
 

@@ -52,6 +52,11 @@ func NewService(cfg aws.Config) *Service {
 	}
 }
 
+// NewServiceFromClient creates a new ECR service from a pre-built SDK client.
+func NewServiceFromClient(client *ecr.Client) *Service {
+	return &Service{client: client}
+}
+
 // NewServiceWithClient creates a new ECR service with a custom client (for testing).
 func NewServiceWithClient(client ECRAPI) *Service {
 	return &Service{client: client}
