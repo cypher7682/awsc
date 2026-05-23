@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -22,25 +21,36 @@ type DetailView struct {
 	subnets   []ec2.Subnet
 
 	// Page widgets
-	overviewPanel *tview.TextView
+	overviewTable *tview.Table
 	subnetsTable  *tview.Table
 	routePanel    *tview.TextView
 	tagsTable     *tview.Table
+
+	// Navigation targets for selectable rows (indexed by "tab:row")
+	navTargets map[string]navigation.Route
 }
 
 // NewDetailView creates a new VPC detail view.
 func NewDetailView(navigator Navigator, vpcID string) *DetailView {
 	v := &DetailView{
-		navigator: navigator,
-		vpcID:     vpcID,
+		navigator:  navigator,
+		vpcID:      vpcID,
+		navTargets: make(map[string]navigation.Route),
 	}
 
 	// --- Overview page ---
-	v.overviewPanel = tview.NewTextView()
-	v.overviewPanel.SetDynamicColors(true)
-	v.overviewPanel.SetBorder(true)
-	v.overviewPanel.SetTitle(" Overview ")
-	v.overviewPanel.SetBorderColor(tcell.ColorDodgerBlue)
+	v.overviewTable = tview.NewTable()
+	v.overviewTable.SetBorders(false)
+	v.overviewTable.SetSelectable(true, false)
+	v.overviewTable.SetBorder(true)
+	v.overviewTable.SetTitle(" Overview ")
+	v.overviewTable.SetBorderColor(tcell.ColorDodgerBlue)
+	v.overviewTable.SetSelectedStyle(tcell.StyleDefault.
+		Background(tcell.ColorDarkSlateGray).
+		Foreground(tcell.ColorWhite))
+	v.overviewTable.SetSelectedFunc(func(row, _ int) {
+		v.navigateRow("overview", row)
+	})
 
 	// --- Subnets page ---
 	v.subnetsTable = tview.NewTable()
@@ -52,6 +62,14 @@ func NewDetailView(navigator Navigator, vpcID string) *DetailView {
 	v.subnetsTable.SetSelectedStyle(tcell.StyleDefault.
 		Background(tcell.ColorDodgerBlue).
 		Foreground(tcell.ColorWhite))
+	v.subnetsTable.SetSelectedFunc(func(row, _ int) {
+		if row > 0 && row-1 < len(v.subnets) {
+			v.navigator.Navigate(navigation.Route{
+				Resource:   "subnet-detail",
+				ResourceID: v.subnets[row-1].SubnetID,
+			})
+		}
+	})
 
 	// --- Route Tables page (placeholder) ---
 	v.routePanel = tview.NewTextView()
@@ -74,7 +92,7 @@ func NewDetailView(navigator Navigator, vpcID string) *DetailView {
 
 	// Build tabbed view
 	v.tabs = components.NewTabbedView([]components.TabPage{
-		{Name: "Overview", Content: v.overviewPanel},
+		{Name: "Overview", Content: v.overviewTable},
 		{Name: "Subnets", Content: v.subnetsTable},
 		{Name: "Route Tables", Content: v.routePanel},
 		{Name: "Tags", Content: v.tagsTable},
@@ -131,6 +149,7 @@ func (v *DetailView) Refresh(ctx context.Context) error {
 func (v *DetailView) Shortcuts() []components.Shortcut {
 	return []components.Shortcut{
 		{Key: "\u2190/\u2192", Label: "tabs"},
+		{Key: "Enter", Label: "navigate"},
 		{Key: "n", Label: "goto subnet"},
 		{Key: "Esc", Label: "back"},
 	}
@@ -144,6 +163,42 @@ func (v *DetailView) FilterFields() []string {
 // HandleFilter applies a filter (no-op).
 func (v *DetailView) HandleFilter(_ string) {}
 
+// --- Navigation helpers ---
+
+// setNavRow adds a key-value row to a table. If route is non-nil, the value gets
+// a ↩ indicator and the row is selectable for navigation.
+func (v *DetailView) setNavRow(table *tview.Table, tab string, row int, label, value string, route *navigation.Route) {
+	// Label column (non-selectable)
+	cell0 := tview.NewTableCell("  " + label).
+		SetTextColor(tcell.ColorDodgerBlue).
+		SetSelectable(false)
+	table.SetCell(row, 0, cell0)
+
+	// Value column
+	valueText := value
+	valueColor := tcell.ColorWhite
+	if route != nil {
+		valueText = value + " [gray]↩[-]"
+		valueColor = tcell.ColorSkyblue
+		key := fmt.Sprintf("%s:%d", tab, row)
+		v.navTargets[key] = *route
+	}
+
+	cell1 := tview.NewTableCell(valueText).
+		SetTextColor(valueColor).
+		SetExpansion(1).
+		SetSelectable(route != nil)
+	table.SetCell(row, 1, cell1)
+}
+
+// navigateRow navigates to the route for the given tab and row.
+func (v *DetailView) navigateRow(tab string, row int) {
+	key := fmt.Sprintf("%s:%d", tab, row)
+	if route, ok := v.navTargets[key]; ok {
+		v.navigator.Navigate(route)
+	}
+}
+
 // --- Render methods ---
 
 func (v *DetailView) renderOverview() {
@@ -151,35 +206,55 @@ func (v *DetailView) renderOverview() {
 		return
 	}
 	vpc := v.vpc
+	v.overviewTable.Clear()
+
+	// Clear nav targets for this tab
+	for k := range v.navTargets {
+		if len(k) > 9 && k[:9] == "overview:" {
+			delete(v.navTargets, k)
+		}
+	}
 
 	isDefault := "No"
 	if vpc.IsDefault {
 		isDefault = "Yes"
 	}
 
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("  [dodgerblue]VPC ID:[-]      %s\n", vpc.VPCID))
-	b.WriteString(fmt.Sprintf("  [dodgerblue]Name:[-]        %s\n", orDash(vpc.Name)))
-	b.WriteString(fmt.Sprintf("  [dodgerblue]CIDR:[-]        %s\n", orDash(vpc.CIDRBlock)))
-	b.WriteString(fmt.Sprintf("  [dodgerblue]State:[-]       %s\n", orDash(vpc.State)))
-	b.WriteString(fmt.Sprintf("  [dodgerblue]Default:[-]     %s\n", isDefault))
-	b.WriteString("\n")
+	row := 0
 
-	// Show all tags
-	if len(vpc.Tags) > 0 {
-		b.WriteString("  [dodgerblue]Tags:[-]\n")
-		keys := make([]string, 0, len(vpc.Tags))
-		for k := range vpc.Tags {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			b.WriteString(fmt.Sprintf("    %s = %s\n", k, vpc.Tags[k]))
-		}
+	v.setNavRow(v.overviewTable, "overview", row, "VPC ID:", vpc.VPCID, nil)
+	row++
+	v.setNavRow(v.overviewTable, "overview", row, "Name:", orDash(vpc.Name), nil)
+	row++
+	v.setNavRow(v.overviewTable, "overview", row, "CIDR:", orDash(vpc.CIDRBlock), nil)
+	row++
+	v.setNavRow(v.overviewTable, "overview", row, "State:", orDash(vpc.State), nil)
+	row++
+	v.setNavRow(v.overviewTable, "overview", row, "Default:", isDefault, nil)
+	row++
+
+	// Separator
+	v.overviewTable.SetCell(row, 0, tview.NewTableCell("").SetSelectable(false))
+	v.overviewTable.SetCell(row, 1, tview.NewTableCell("").SetSelectable(false))
+	row++
+
+	// Subnets section header
+	v.overviewTable.SetCell(row, 0, tview.NewTableCell("  Subnets:").SetTextColor(tcell.ColorDodgerBlue).SetSelectable(false))
+	v.overviewTable.SetCell(row, 1, tview.NewTableCell(fmt.Sprintf("%d in this VPC", len(v.subnets))).SetTextColor(tcell.ColorWhite).SetSelectable(false))
+	row++
+
+	// Each subnet as a navigable row
+	for _, subnet := range v.subnets {
+		label := fmt.Sprintf("  ├─ %s", orDash(subnet.Name))
+		value := fmt.Sprintf("%s (%s, %s)", subnet.SubnetID, subnet.CIDRBlock, subnet.AZ)
+		v.setNavRow(v.overviewTable, "overview", row, label, value, &navigation.Route{
+			Resource:   "subnet-detail",
+			ResourceID: subnet.SubnetID,
+		})
+		row++
 	}
 
-	v.overviewPanel.SetText(b.String())
-	v.overviewPanel.SetTitle(fmt.Sprintf(" Overview: %s ", orDash(vpc.Name)))
+	v.overviewTable.SetTitle(fmt.Sprintf(" Overview: %s ", orDash(vpc.Name)))
 }
 
 func (v *DetailView) renderSubnets() {
@@ -208,6 +283,7 @@ func (v *DetailView) renderSubnets() {
 	}
 
 	v.subnetsTable.SetTitle(fmt.Sprintf(" Subnets (%d) ", len(v.subnets)))
+	v.subnetsTable.SetFixed(1, 0)
 }
 
 func (v *DetailView) renderTags() {
@@ -238,6 +314,7 @@ func (v *DetailView) renderTags() {
 	}
 
 	v.tagsTable.SetTitle(fmt.Sprintf(" Tags (%d) ", len(v.vpc.Tags)))
+	v.tagsTable.SetFixed(1, 0)
 }
 
 // --- Event handlers ---
@@ -245,14 +322,16 @@ func (v *DetailView) renderTags() {
 func (v *DetailView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 	switch event.Rune() {
 	case 'n':
-		// Navigate to selected subnet
-		row, _ := v.subnetsTable.GetSelection()
-		if row > 0 && row-1 < len(v.subnets) {
-			v.navigator.Navigate(navigation.Route{
-				Resource:   "subnet",
-				ResourceID: v.subnets[row-1].SubnetID,
-			})
-			return nil
+		// Navigate to selected subnet from subnets tab
+		if v.tabs.CurrentPage() == 1 {
+			row, _ := v.subnetsTable.GetSelection()
+			if row > 0 && row-1 < len(v.subnets) {
+				v.navigator.Navigate(navigation.Route{
+					Resource:   "subnet-detail",
+					ResourceID: v.subnets[row-1].SubnetID,
+				})
+				return nil
+			}
 		}
 	}
 	return event

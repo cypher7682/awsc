@@ -21,24 +21,35 @@ type DetailView struct {
 	instances []ec2.Instance
 
 	// Page widgets
-	overviewPanel *tview.TextView
+	overviewTable *tview.Table
 	instanceTable *tview.Table
 	tagsTable     *tview.Table
+
+	// Navigation targets for selectable rows (indexed by "tab:row")
+	navTargets map[string]navigation.Route
 }
 
 // NewDetailView creates a new subnet detail view.
 func NewDetailView(navigator Navigator, subnetID string) *DetailView {
 	v := &DetailView{
-		navigator: navigator,
-		subnetID:  subnetID,
+		navigator:  navigator,
+		subnetID:   subnetID,
+		navTargets: make(map[string]navigation.Route),
 	}
 
 	// --- Overview page ---
-	v.overviewPanel = tview.NewTextView()
-	v.overviewPanel.SetDynamicColors(true)
-	v.overviewPanel.SetBorder(true)
-	v.overviewPanel.SetTitle(" Overview ")
-	v.overviewPanel.SetBorderColor(tcell.ColorDodgerBlue)
+	v.overviewTable = tview.NewTable()
+	v.overviewTable.SetBorders(false)
+	v.overviewTable.SetSelectable(true, false)
+	v.overviewTable.SetBorder(true)
+	v.overviewTable.SetTitle(" Overview ")
+	v.overviewTable.SetBorderColor(tcell.ColorDodgerBlue)
+	v.overviewTable.SetSelectedStyle(tcell.StyleDefault.
+		Background(tcell.ColorDarkSlateGray).
+		Foreground(tcell.ColorWhite))
+	v.overviewTable.SetSelectedFunc(func(row, _ int) {
+		v.navigateRow("overview", row)
+	})
 
 	// --- Instances page ---
 	v.instanceTable = tview.NewTable()
@@ -50,6 +61,14 @@ func NewDetailView(navigator Navigator, subnetID string) *DetailView {
 	v.instanceTable.SetSelectedStyle(tcell.StyleDefault.
 		Background(tcell.ColorDodgerBlue).
 		Foreground(tcell.ColorWhite))
+	v.instanceTable.SetSelectedFunc(func(row, _ int) {
+		if row > 0 && row-1 < len(v.instances) {
+			v.navigator.Navigate(navigation.Route{
+				Resource:   "ec2-detail",
+				ResourceID: v.instances[row-1].InstanceID,
+			})
+		}
+	})
 
 	// --- Tags page ---
 	v.tagsTable = tview.NewTable()
@@ -64,7 +83,7 @@ func NewDetailView(navigator Navigator, subnetID string) *DetailView {
 
 	// Build tabbed view
 	v.tabs = components.NewTabbedView([]components.TabPage{
-		{Name: "Overview", Content: v.overviewPanel},
+		{Name: "Overview", Content: v.overviewTable},
 		{Name: "Instances", Content: v.instanceTable},
 		{Name: "Tags", Content: v.tagsTable},
 	})
@@ -130,7 +149,7 @@ func (v *DetailView) Refresh(ctx context.Context) error {
 func (v *DetailView) Shortcuts() []components.Shortcut {
 	return []components.Shortcut{
 		{Key: "←/→", Label: "tab"},
-		{Key: "Enter", Label: "select instance"},
+		{Key: "Enter", Label: "navigate"},
 		{Key: "v", Label: "goto VPC"},
 		{Key: "Esc", Label: "back"},
 	}
@@ -144,44 +163,108 @@ func (v *DetailView) FilterFields() []string {
 // HandleFilter is a no-op for the detail view.
 func (v *DetailView) HandleFilter(_ string) {}
 
+// --- Navigation helpers ---
+
+// setNavRow adds a key-value row to a table. If route is non-nil, the value gets
+// a ↩ indicator and the row is selectable for navigation.
+func (v *DetailView) setNavRow(table *tview.Table, tab string, row int, label, value string, route *navigation.Route) {
+	// Label column (non-selectable)
+	cell0 := tview.NewTableCell("  " + label).
+		SetTextColor(tcell.ColorDodgerBlue).
+		SetSelectable(false)
+	table.SetCell(row, 0, cell0)
+
+	// Value column
+	valueText := value
+	valueColor := tcell.ColorWhite
+	if route != nil {
+		valueText = value + " [gray]↩[-]"
+		valueColor = tcell.ColorSkyblue
+		key := fmt.Sprintf("%s:%d", tab, row)
+		v.navTargets[key] = *route
+	}
+
+	cell1 := tview.NewTableCell(valueText).
+		SetTextColor(valueColor).
+		SetExpansion(1).
+		SetSelectable(route != nil)
+	table.SetCell(row, 1, cell1)
+}
+
+// navigateRow navigates to the route for the given tab and row.
+func (v *DetailView) navigateRow(tab string, row int) {
+	key := fmt.Sprintf("%s:%d", tab, row)
+	if route, ok := v.navTargets[key]; ok {
+		v.navigator.Navigate(route)
+	}
+}
+
+// --- Render methods ---
+
 func (v *DetailView) renderOverview() {
-	v.overviewPanel.Clear()
 	if v.subnet == nil {
 		return
 	}
 	s := v.subnet
+	v.overviewTable.Clear()
 
-	publicIP := "No"
-	if s.MapPublicIP {
-		publicIP = "[green]Yes[-]"
-	}
-
-	text := fmt.Sprintf(
-		"[yellow]Subnet ID:[-]      %s\n"+
-			"[yellow]Name:[-]           %s\n"+
-			"[yellow]VPC ID:[-]         %s\n"+
-			"[yellow]CIDR:[-]           %s\n"+
-			"[yellow]AZ:[-]             %s\n"+
-			"[yellow]Available IPs:[-]  %d\n"+
-			"[yellow]Map Public IP:[-]  %s\n",
-		s.SubnetID,
-		orDash(s.Name),
-		s.VPCID,
-		s.CIDRBlock,
-		s.AZ,
-		s.AvailableIPs,
-		publicIP,
-	)
-
-	if len(s.Tags) > 0 {
-		text += "\n[yellow]Tags:[-]\n"
-		keys := sortedKeys(s.Tags)
-		for _, k := range keys {
-			text += fmt.Sprintf("  [blue]%s[-] = %s\n", k, s.Tags[k])
+	// Clear nav targets for this tab
+	for k := range v.navTargets {
+		if len(k) > 9 && k[:9] == "overview:" {
+			delete(v.navTargets, k)
 		}
 	}
 
-	v.overviewPanel.SetText(text)
+	publicIP := "No"
+	if s.MapPublicIP {
+		publicIP = "Yes"
+	}
+
+	row := 0
+
+	v.setNavRow(v.overviewTable, "overview", row, "Subnet ID:", s.SubnetID, nil)
+	row++
+	v.setNavRow(v.overviewTable, "overview", row, "Name:", orDash(s.Name), nil)
+	row++
+
+	// Navigable: VPC
+	v.setNavRow(v.overviewTable, "overview", row, "VPC ID:", s.VPCID, &navigation.Route{
+		Resource:   "vpc-detail",
+		ResourceID: s.VPCID,
+	})
+	row++
+
+	v.setNavRow(v.overviewTable, "overview", row, "CIDR:", s.CIDRBlock, nil)
+	row++
+	v.setNavRow(v.overviewTable, "overview", row, "AZ:", s.AZ, nil)
+	row++
+	v.setNavRow(v.overviewTable, "overview", row, "Available IPs:", fmt.Sprintf("%d", s.AvailableIPs), nil)
+	row++
+	v.setNavRow(v.overviewTable, "overview", row, "Map Public IP:", publicIP, nil)
+	row++
+
+	// Separator
+	v.overviewTable.SetCell(row, 0, tview.NewTableCell("").SetSelectable(false))
+	v.overviewTable.SetCell(row, 1, tview.NewTableCell("").SetSelectable(false))
+	row++
+
+	// Instances section header
+	v.overviewTable.SetCell(row, 0, tview.NewTableCell("  Instances:").SetTextColor(tcell.ColorDodgerBlue).SetSelectable(false))
+	v.overviewTable.SetCell(row, 1, tview.NewTableCell(fmt.Sprintf("%d in this subnet", len(v.instances))).SetTextColor(tcell.ColorWhite).SetSelectable(false))
+	row++
+
+	// Each instance as a navigable row
+	for _, inst := range v.instances {
+		label := fmt.Sprintf("  ├─ %s", orDash(inst.Name))
+		value := fmt.Sprintf("%s (%s, %s)", inst.InstanceID, inst.Type, inst.State)
+		v.setNavRow(v.overviewTable, "overview", row, label, value, &navigation.Route{
+			Resource:   "ec2-detail",
+			ResourceID: inst.InstanceID,
+		})
+		row++
+	}
+
+	v.overviewTable.SetTitle(fmt.Sprintf(" Overview: %s ", orDash(s.Name)))
 }
 
 func (v *DetailView) renderInstances() {
@@ -191,7 +274,7 @@ func (v *DetailView) renderInstances() {
 	headers := []string{"INSTANCE ID", "NAME", "STATE", "TYPE", "PRIVATE IP"}
 	for col, h := range headers {
 		cell := tview.NewTableCell(h).
-			SetTextColor(tcell.ColorYellow).
+			SetTextColor(tcell.ColorDodgerBlue).
 			SetSelectable(false).
 			SetExpansion(1)
 		v.instanceTable.SetCell(0, col, cell)
@@ -199,14 +282,16 @@ func (v *DetailView) renderInstances() {
 
 	for i, inst := range v.instances {
 		row := i + 1
-		stateColor := tcell.ColorWhite
+		instStateColor := tcell.ColorWhite
 		switch inst.State {
 		case "running":
-			stateColor = tcell.ColorGreen
+			instStateColor = tcell.ColorGreen
 		case "stopped":
-			stateColor = tcell.ColorRed
+			instStateColor = tcell.ColorRed
 		case "terminated":
-			stateColor = tcell.ColorGray
+			instStateColor = tcell.ColorGray
+		case "pending", "stopping":
+			instStateColor = tcell.ColorYellow
 		}
 
 		cells := []struct {
@@ -215,7 +300,7 @@ func (v *DetailView) renderInstances() {
 		}{
 			{inst.InstanceID, tcell.ColorWhite},
 			{orDash(inst.Name), tcell.ColorLightGray},
-			{inst.State, stateColor},
+			{inst.State, instStateColor},
 			{inst.Type, tcell.ColorLightGray},
 			{orDash(inst.PrivateIP), tcell.ColorLightGray},
 		}
@@ -228,6 +313,7 @@ func (v *DetailView) renderInstances() {
 		}
 	}
 
+	v.instanceTable.SetTitle(fmt.Sprintf(" Instances (%d) ", len(v.instances)))
 	v.instanceTable.SetFixed(1, 0)
 }
 
@@ -237,7 +323,7 @@ func (v *DetailView) renderTags() {
 	// Header
 	for col, h := range []string{"KEY", "VALUE"} {
 		cell := tview.NewTableCell(h).
-			SetTextColor(tcell.ColorYellow).
+			SetTextColor(tcell.ColorDodgerBlue).
 			SetSelectable(false).
 			SetExpansion(1)
 		v.tagsTable.SetCell(0, col, cell)
@@ -251,33 +337,20 @@ func (v *DetailView) renderTags() {
 	for i, k := range keys {
 		row := i + 1
 		v.tagsTable.SetCell(row, 0, tview.NewTableCell(k).
-			SetTextColor(tcell.ColorBlue).
+			SetTextColor(tcell.ColorWhite).
 			SetExpansion(1))
 		v.tagsTable.SetCell(row, 1, tview.NewTableCell(v.subnet.Tags[k]).
-			SetTextColor(tcell.ColorWhite).
+			SetTextColor(tcell.ColorLightGray).
 			SetExpansion(1))
 	}
 
+	v.tagsTable.SetTitle(fmt.Sprintf(" Tags (%d) ", len(v.subnet.Tags)))
 	v.tagsTable.SetFixed(1, 0)
 }
 
-func (v *DetailView) handleInput(event *tcell.EventKey) *tcell.EventKey {
-	switch event.Key() {
-	case tcell.KeyEnter:
-		// Navigate to EC2 detail if on Instances tab
-		if v.tabs.CurrentPage() == 1 {
-			row, _ := v.instanceTable.GetSelection()
-			idx := row - 1 // account for header
-			if idx >= 0 && idx < len(v.instances) {
-				v.navigator.Navigate(navigation.Route{
-					Resource:   "ec2-detail",
-					ResourceID: v.instances[idx].InstanceID,
-				})
-				return nil
-			}
-		}
-	}
+// --- Event handlers ---
 
+func (v *DetailView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 	switch event.Rune() {
 	case 'v':
 		if v.subnet != nil {
@@ -288,9 +361,10 @@ func (v *DetailView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 			return nil
 		}
 	}
-
 	return event
 }
+
+// --- Helpers ---
 
 func orDash(s string) string {
 	if s == "" {

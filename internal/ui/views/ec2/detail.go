@@ -23,12 +23,15 @@ type DetailView struct {
 	sgs        []ec2.SecurityGroup
 
 	// Page widgets
-	overviewPanel  *tview.TextView
-	networkPanel   *tview.TextView
+	overviewTable  *tview.Table
+	networkTable   *tview.Table
 	sgList         *tview.Table
 	sgRules        *tview.Table
 	tagsTable      *tview.Table
 	selectedSGIdx  int
+
+	// Navigation targets for selectable rows (indexed by "tab:row")
+	navTargets map[string]navigation.Route
 
 	// Monitoring tab
 	monitoringPage *tview.Flex
@@ -40,21 +43,36 @@ func NewDetailView(navigator Navigator, instanceID string) *DetailView {
 	v := &DetailView{
 		navigator:  navigator,
 		instanceID: instanceID,
+		navTargets: make(map[string]navigation.Route),
 	}
 
 	// --- Overview page ---
-	v.overviewPanel = tview.NewTextView()
-	v.overviewPanel.SetDynamicColors(true)
-	v.overviewPanel.SetBorder(true)
-	v.overviewPanel.SetTitle(" Overview ")
-	v.overviewPanel.SetBorderColor(tcell.ColorDodgerBlue)
+	v.overviewTable = tview.NewTable()
+	v.overviewTable.SetBorders(false)
+	v.overviewTable.SetSelectable(true, false)
+	v.overviewTable.SetBorder(true)
+	v.overviewTable.SetTitle(" Overview ")
+	v.overviewTable.SetBorderColor(tcell.ColorDodgerBlue)
+	v.overviewTable.SetSelectedStyle(tcell.StyleDefault.
+		Background(tcell.ColorDarkSlateGray).
+		Foreground(tcell.ColorWhite))
+	v.overviewTable.SetSelectedFunc(func(row, _ int) {
+		v.navigateRow("overview", row)
+	})
 
 	// --- Networking page ---
-	v.networkPanel = tview.NewTextView()
-	v.networkPanel.SetDynamicColors(true)
-	v.networkPanel.SetBorder(true)
-	v.networkPanel.SetTitle(" Networking ")
-	v.networkPanel.SetBorderColor(tcell.ColorDodgerBlue)
+	v.networkTable = tview.NewTable()
+	v.networkTable.SetBorders(false)
+	v.networkTable.SetSelectable(true, false)
+	v.networkTable.SetBorder(true)
+	v.networkTable.SetTitle(" Networking ")
+	v.networkTable.SetBorderColor(tcell.ColorDodgerBlue)
+	v.networkTable.SetSelectedStyle(tcell.StyleDefault.
+		Background(tcell.ColorDarkSlateGray).
+		Foreground(tcell.ColorWhite))
+	v.networkTable.SetSelectedFunc(func(row, _ int) {
+		v.navigateRow("network", row)
+	})
 
 	// --- Security Groups page (split: SG list top, rules bottom) ---
 	v.sgList = tview.NewTable()
@@ -124,8 +142,8 @@ func NewDetailView(navigator Navigator, instanceID string) *DetailView {
 
 	// Build tabbed view
 	v.tabs = components.NewTabbedView([]components.TabPage{
-		{Name: "Overview", Content: v.overviewPanel},
-		{Name: "Networking", Content: v.networkPanel},
+		{Name: "Overview", Content: v.overviewTable},
+		{Name: "Networking", Content: v.networkTable},
 		{Name: "Security Groups", Content: sgPage},
 		{Name: "Monitoring", Content: v.monitoringPage},
 		{Name: "Tags", Content: v.tagsTable},
@@ -254,27 +272,81 @@ func (v *DetailView) HandleFilter(_ string) {}
 
 // --- Render methods ---
 
+// navigateRow handles Enter on a navigable row.
+func (v *DetailView) navigateRow(tab string, row int) {
+	key := fmt.Sprintf("%s:%d", tab, row)
+	if route, ok := v.navTargets[key]; ok {
+		v.navigator.Navigate(route)
+	}
+}
+
+// setNavRow writes a key-value row into a table, with optional navigation target.
+// If route is non-nil, appends a ↩ indicator to show it's navigable.
+func (v *DetailView) setNavRow(table *tview.Table, tab string, row int, label, value string, route *navigation.Route) {
+	cell0 := tview.NewTableCell("  " + label).
+		SetTextColor(tcell.ColorDodgerBlue).
+		SetSelectable(route != nil)
+	table.SetCell(row, 0, cell0)
+
+	displayValue := value
+	valueColor := tcell.ColorWhite
+	if route != nil {
+		displayValue = value + " [gray]↩[-]"
+		valueColor = tcell.ColorLightCyan
+		v.navTargets[fmt.Sprintf("%s:%d", tab, row)] = *route
+	}
+
+	cell1 := tview.NewTableCell(displayValue).
+		SetTextColor(valueColor).
+		SetExpansion(1).
+		SetSelectable(route != nil)
+	table.SetCell(row, 1, cell1)
+}
+
 func (v *DetailView) renderOverview() {
 	if v.instance == nil {
 		return
 	}
 	inst := v.instance
+	v.overviewTable.Clear()
 
-	stColor := stateColorName(inst.State)
+	row := 0
 
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("  [dodgerblue]Instance ID:[-]   %s\n", inst.InstanceID))
-	b.WriteString(fmt.Sprintf("  [dodgerblue]Name:[-]          %s\n", orDash(inst.Name)))
-	b.WriteString(fmt.Sprintf("  [dodgerblue]State:[-]         [%s]%s[-]\n", stColor, inst.State))
-	b.WriteString(fmt.Sprintf("  [dodgerblue]Type:[-]          %s\n", inst.Type))
-	b.WriteString(fmt.Sprintf("  [dodgerblue]Platform:[-]      %s\n", orDash(inst.Platform)))
-	b.WriteString(fmt.Sprintf("  [dodgerblue]AMI:[-]           %s\n", orDash(inst.AMI)))
-	b.WriteString(fmt.Sprintf("  [dodgerblue]Key Name:[-]      %s\n", orDash(inst.KeyName)))
-	b.WriteString(fmt.Sprintf("  [dodgerblue]AZ:[-]            %s\n", orDash(inst.AZ)))
-	b.WriteString(fmt.Sprintf("  [dodgerblue]Launch Time:[-]   %s\n", inst.LaunchTime.Format("2006-01-02 15:04:05 UTC")))
+	v.setNavRow(v.overviewTable, "overview", row, "Instance ID:", inst.InstanceID, nil)
+	row++
+	v.setNavRow(v.overviewTable, "overview", row, "Name:", orDash(inst.Name), nil)
+	row++
 
-	v.overviewPanel.SetText(b.String())
-	v.overviewPanel.SetTitle(fmt.Sprintf(" Overview: %s ", orDash(inst.Name)))
+	// State row (custom coloring)
+	v.overviewTable.SetCell(row, 0, tview.NewTableCell("  State:").SetTextColor(tcell.ColorDodgerBlue).SetSelectable(false))
+	v.overviewTable.SetCell(row, 1, tview.NewTableCell(inst.State).SetTextColor(stateColor(inst.State)).SetSelectable(false))
+	row++
+
+	v.setNavRow(v.overviewTable, "overview", row, "Type:", inst.Type, nil)
+	row++
+	v.setNavRow(v.overviewTable, "overview", row, "Platform:", orDash(inst.Platform), nil)
+	row++
+	v.setNavRow(v.overviewTable, "overview", row, "AMI:", orDash(inst.AMI), nil)
+	row++
+	v.setNavRow(v.overviewTable, "overview", row, "Key Name:", orDash(inst.KeyName), nil)
+	row++
+	v.setNavRow(v.overviewTable, "overview", row, "AZ:", orDash(inst.AZ), nil)
+	row++
+	v.setNavRow(v.overviewTable, "overview", row, "Launch Time:", inst.LaunchTime.Format("2006-01-02 15:04:05 UTC"), nil)
+	row++
+
+	// Navigable: VPC
+	if inst.VPCID != "" {
+		v.setNavRow(v.overviewTable, "overview", row, "VPC:", inst.VPCID, &navigation.Route{Resource: "vpc-detail", ResourceID: inst.VPCID})
+		row++
+	}
+	// Navigable: Subnet
+	if inst.SubnetID != "" {
+		v.setNavRow(v.overviewTable, "overview", row, "Subnet:", inst.SubnetID, &navigation.Route{Resource: "subnet-detail", ResourceID: inst.SubnetID})
+		row++
+	}
+
+	v.overviewTable.SetTitle(fmt.Sprintf(" Overview: %s ", orDash(inst.Name)))
 }
 
 func (v *DetailView) renderNetworking() {
@@ -282,16 +354,44 @@ func (v *DetailView) renderNetworking() {
 		return
 	}
 	inst := v.instance
+	v.networkTable.Clear()
 
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("  [dodgerblue]VPC ID:[-]        %s\n", orDash(inst.VPCID)))
-	b.WriteString(fmt.Sprintf("  [dodgerblue]Subnet ID:[-]     %s\n", orDash(inst.SubnetID)))
-	b.WriteString(fmt.Sprintf("  [dodgerblue]AZ:[-]            %s\n", orDash(inst.AZ)))
-	b.WriteString(fmt.Sprintf("  [dodgerblue]Private IP:[-]    %s\n", orDash(inst.PrivateIP)))
-	b.WriteString(fmt.Sprintf("  [dodgerblue]Public IP:[-]     %s\n", orDash(inst.PublicIP)))
-	b.WriteString("\n")
-	b.WriteString(fmt.Sprintf("  [dodgerblue]Security Groups:[-] %d attached\n", len(inst.SecurityGroupIDs)))
-	for i, sgID := range inst.SecurityGroupIDs {
+	row := 0
+
+	// Navigable: VPC
+	if inst.VPCID != "" {
+		v.setNavRow(v.networkTable, "network", row, "VPC ID:", inst.VPCID, &navigation.Route{Resource: "vpc-detail", ResourceID: inst.VPCID})
+	} else {
+		v.setNavRow(v.networkTable, "network", row, "VPC ID:", "-", nil)
+	}
+	row++
+
+	// Navigable: Subnet
+	if inst.SubnetID != "" {
+		v.setNavRow(v.networkTable, "network", row, "Subnet ID:", inst.SubnetID, &navigation.Route{Resource: "subnet-detail", ResourceID: inst.SubnetID})
+	} else {
+		v.setNavRow(v.networkTable, "network", row, "Subnet ID:", "-", nil)
+	}
+	row++
+
+	v.setNavRow(v.networkTable, "network", row, "AZ:", orDash(inst.AZ), nil)
+	row++
+	v.setNavRow(v.networkTable, "network", row, "Private IP:", orDash(inst.PrivateIP), nil)
+	row++
+	v.setNavRow(v.networkTable, "network", row, "Public IP:", orDash(inst.PublicIP), nil)
+	row++
+
+	// Separator
+	v.networkTable.SetCell(row, 0, tview.NewTableCell("").SetSelectable(false))
+	v.networkTable.SetCell(row, 1, tview.NewTableCell("").SetSelectable(false))
+	row++
+
+	// Security Groups - each navigable
+	v.networkTable.SetCell(row, 0, tview.NewTableCell("  Security Groups:").SetTextColor(tcell.ColorDodgerBlue).SetSelectable(false))
+	v.networkTable.SetCell(row, 1, tview.NewTableCell(fmt.Sprintf("%d attached", len(inst.SecurityGroupIDs))).SetTextColor(tcell.ColorWhite).SetSelectable(false))
+	row++
+
+	for _, sgID := range inst.SecurityGroupIDs {
 		sgName := ""
 		for _, sg := range v.sgs {
 			if sg.GroupID == sgID {
@@ -299,14 +399,12 @@ func (v *DetailView) renderNetworking() {
 				break
 			}
 		}
-		prefix := "  \u251c\u2500"
-		if i == len(inst.SecurityGroupIDs)-1 {
-			prefix = "  \u2514\u2500"
-		}
-		b.WriteString(fmt.Sprintf("  %s [white]%s[-] [gray](%s)[-]\n", prefix, sgID, sgName))
+		label := fmt.Sprintf("%s (%s)", sgID, sgName)
+		v.setNavRow(v.networkTable, "network", row, "  ├─", label, &navigation.Route{Resource: "sg-detail", ResourceID: sgID})
+		row++
 	}
 
-	v.networkPanel.SetText(b.String())
+	v.networkTable.SetTitle(" Networking ")
 }
 
 func (v *DetailView) renderSGList() {
