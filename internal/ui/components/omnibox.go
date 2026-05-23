@@ -24,6 +24,7 @@ const (
 	OmniboxModeCommand                    // Typing a :command
 	OmniboxModeFilter                     // Typing a /filter
 	OmniboxModeConfirm                    // Confirming an action
+	OmniboxModeInput                      // Free-text input with callback
 )
 
 // OmniboxHandler handles omnibox events.
@@ -31,6 +32,7 @@ type OmniboxHandler interface {
 	OnCommand(command string)
 	OnFilter(filter string)
 	OnConfirm(confirmed bool)
+	OnInput(text string)
 }
 
 // Omnibox is the bottom bar that handles commands, filtering, and status.
@@ -38,13 +40,14 @@ type OmniboxHandler interface {
 // switching between a read-only status display and an editable input mode.
 type Omnibox struct {
 	*tview.InputField
-	mode        OmniboxMode
-	handler     OmniboxHandler
-	suggestions []FilterSuggestion
-	allFields   []string
-	statusText  string
-	profiles    []string // available AWS profiles
-	regions     []string // available AWS regions
+	mode          OmniboxMode
+	handler       OmniboxHandler
+	suggestions   []FilterSuggestion
+	allFields     []string
+	statusText    string
+	profiles      []string // available AWS profiles
+	regions       []string // available AWS regions
+	inputCallback func(string) // callback for OmniboxModeInput
 }
 
 // NewOmnibox creates a new omnibox component.
@@ -119,6 +122,9 @@ func (o *Omnibox) Activate(mode OmniboxMode) {
 	case OmniboxModeConfirm:
 		o.InputField.SetLabel("[red::b]Confirm (y/N): [-::-]")
 		o.InputField.SetPlaceholder("")
+	case OmniboxModeInput:
+		o.InputField.SetLabel("[dodgerblue::b]> [-::-]")
+		o.InputField.SetPlaceholder("")
 	}
 }
 
@@ -168,6 +174,14 @@ func (o *Omnibox) HandleInput() {
 		if o.handler != nil {
 			o.handler.OnConfirm(confirmed)
 		}
+	case OmniboxModeInput:
+		if o.inputCallback != nil {
+			cb := o.inputCallback
+			o.inputCallback = nil
+			cb(text)
+		} else if o.handler != nil {
+			o.handler.OnInput(text)
+		}
 	}
 
 	o.Deactivate()
@@ -177,6 +191,15 @@ func (o *Omnibox) HandleInput() {
 func (o *Omnibox) SetConfirmPrompt(prompt string) {
 	o.Activate(OmniboxModeConfirm)
 	o.InputField.SetLabel(fmt.Sprintf("[red::b]%s (y/N): [-::-]", prompt))
+}
+
+// SetInputPrompt sets the omnibox to free-text input mode with a prompt and callback.
+// The prefill argument pre-populates the input field (useful for editing existing values).
+func (o *Omnibox) SetInputPrompt(prompt, prefill string, callback func(string)) {
+	o.inputCallback = callback
+	o.Activate(OmniboxModeInput)
+	o.InputField.SetLabel(fmt.Sprintf("[dodgerblue::b]%s: [-::-]", prompt))
+	o.InputField.SetText(prefill)
 }
 
 // GetCompletions returns the popup completion items for the current text.

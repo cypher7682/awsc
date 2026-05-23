@@ -53,6 +53,12 @@ func main() {
 	app.RegisterViewFactory("ec2-detail", func(route navigation.Route) ui.View {
 		return ec2view.NewDetailView(app, route.ResourceID)
 	})
+	app.RegisterViewFactory("vpc-detail", func(route navigation.Route) ui.View {
+		return vpcview.NewDetailView(app, route.ResourceID)
+	})
+	app.RegisterViewFactory("subnet-detail", func(route navigation.Route) ui.View {
+		return subnetview.NewDetailView(app, route.ResourceID)
+	})
 
 	if err := app.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

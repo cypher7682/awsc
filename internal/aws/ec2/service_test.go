@@ -74,6 +74,14 @@ func (m *mockEC2Client) RevokeSecurityGroupIngress(ctx context.Context, params *
 	return m.revokeIngressOutput, m.revokeIngressError
 }
 
+func (m *mockEC2Client) CreateTags(ctx context.Context, params *ec2.CreateTagsInput, optFns ...func(*ec2.Options)) (*ec2.CreateTagsOutput, error) {
+	return &ec2.CreateTagsOutput{}, nil
+}
+
+func (m *mockEC2Client) DeleteTags(ctx context.Context, params *ec2.DeleteTagsInput, optFns ...func(*ec2.Options)) (*ec2.DeleteTagsOutput, error) {
+	return &ec2.DeleteTagsOutput{}, nil
+}
+
 func TestListInstancesRaw(t *testing.T) {
 	now := time.Now()
 	mock := &mockEC2Client{

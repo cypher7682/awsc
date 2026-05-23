@@ -232,10 +232,12 @@ func (v *DetailView) fetchMetrics() {
 func (v *DetailView) Shortcuts() []components.Shortcut {
 	return []components.Shortcut{
 		{Key: "\u2190/\u2192", Label: "tabs"},
-		{Key: "Del", Label: "terminate"},
+		{Key: "Del", Label: "terminate/del tag"},
 		{Key: "r", Label: "reboot"},
 		{Key: "x", Label: "stop"},
 		{Key: "a", Label: "start"},
+		{Key: "e", Label: "edit tag"},
+		{Key: "+", Label: "add tag"},
 		{Key: "v", Label: "goto VPC"},
 		{Key: "n", Label: "goto subnet"},
 		{Key: "Esc", Label: "back"},
@@ -425,8 +427,15 @@ func (v *DetailView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 		return event
 	}
 
-	// Delete key = terminate
+	// Tags tab specific keys (tab index 4)
+	onTagsTab := v.tabs.CurrentPage() == 4
+
+	// Delete key: terminate instance OR delete tag depending on active tab
 	if event.Key() == tcell.KeyDelete {
+		if onTagsTab {
+			v.deleteSelectedTag()
+			return nil
+		}
 		name := v.instance.Name
 		if name == "" {
 			name = v.instanceID
@@ -449,10 +458,20 @@ func (v *DetailView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 	}
 
 	switch event.Rune() {
+	case 'e':
+		if onTagsTab {
+			v.editSelectedTag()
+			return nil
+		}
+	case '+':
+		if onTagsTab {
+			v.addNewTag()
+			return nil
+		}
 	case 'v':
 		if v.instance.VPCID != "" {
 			v.navigator.Navigate(navigation.Route{
-				Resource:   "vpc",
+				Resource:   "vpc-detail",
 				ResourceID: v.instance.VPCID,
 			})
 		}
@@ -460,7 +479,7 @@ func (v *DetailView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 	case 'n':
 		if v.instance.SubnetID != "" {
 			v.navigator.Navigate(navigation.Route{
-				Resource:   "subnet",
+				Resource:   "subnet-detail",
 				ResourceID: v.instance.SubnetID,
 			})
 		}
@@ -522,6 +541,102 @@ func (v *DetailView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 	}
 
 	return event
+}
+
+// --- Tag editing ---
+
+// selectedTagKey returns the key of the currently selected tag row.
+func (v *DetailView) selectedTagKey() string {
+	row, _ := v.tagsTable.GetSelection()
+	if row <= 0 { // header row
+		return ""
+	}
+	cell := v.tagsTable.GetCell(row, 0)
+	if cell == nil {
+		return ""
+	}
+	return cell.Text
+}
+
+// editSelectedTag prompts the user to edit the value of the selected tag.
+func (v *DetailView) editSelectedTag() {
+	key := v.selectedTagKey()
+	if key == "" {
+		return
+	}
+	currentValue := v.instance.Tags[key]
+	instanceID := v.instanceID
+
+	v.navigator.ShowInput(fmt.Sprintf("Tag '%s'", key), currentValue, func(newValue string) {
+		v.navigator.SetStatus(fmt.Sprintf("[yellow]Updating tag %s...", key))
+		go func() {
+			err := v.navigator.EC2Service().CreateTag(v.navigator.Context(), instanceID, key, newValue)
+			v.navigator.TviewApp().QueueUpdateDraw(func() {
+				if err != nil {
+					v.navigator.SetStatus(fmt.Sprintf("[red]Failed to update tag: %s", err.Error()))
+				} else {
+					v.instance.Tags[key] = newValue
+					v.renderTags()
+					v.navigator.SetStatus(fmt.Sprintf("[green]Tag '%s' updated", key))
+				}
+			})
+		}()
+	})
+}
+
+// addNewTag prompts for a new tag key, then value.
+func (v *DetailView) addNewTag() {
+	instanceID := v.instanceID
+
+	v.navigator.ShowInput("New tag key", "", func(key string) {
+		if key == "" {
+			v.navigator.SetStatus("[gray]Cancelled")
+			return
+		}
+		v.navigator.ShowInput(fmt.Sprintf("Value for '%s'", key), "", func(value string) {
+			v.navigator.SetStatus(fmt.Sprintf("[yellow]Creating tag %s...", key))
+			go func() {
+				err := v.navigator.EC2Service().CreateTag(v.navigator.Context(), instanceID, key, value)
+				v.navigator.TviewApp().QueueUpdateDraw(func() {
+					if err != nil {
+						v.navigator.SetStatus(fmt.Sprintf("[red]Failed to create tag: %s", err.Error()))
+					} else {
+						if v.instance.Tags == nil {
+							v.instance.Tags = make(map[string]string)
+						}
+						v.instance.Tags[key] = value
+						v.renderTags()
+						v.navigator.SetStatus(fmt.Sprintf("[green]Tag '%s' created", key))
+					}
+				})
+			}()
+		})
+	})
+}
+
+// deleteSelectedTag confirms and deletes the selected tag.
+func (v *DetailView) deleteSelectedTag() {
+	key := v.selectedTagKey()
+	if key == "" {
+		return
+	}
+	instanceID := v.instanceID
+
+	v.navigator.ShowConfirm(fmt.Sprintf("Delete tag '%s'?", key), func() {
+		v.navigator.SetStatus(fmt.Sprintf("[yellow]Deleting tag %s...", key))
+		go func() {
+			err := v.navigator.EC2Service().DeleteTag(v.navigator.Context(), instanceID, key)
+			v.navigator.TviewApp().QueueUpdateDraw(func() {
+				if err != nil {
+					v.navigator.SetStatus(fmt.Sprintf("[red]Failed to delete tag: %s", err.Error()))
+				} else {
+					delete(v.instance.Tags, key)
+					v.renderTags()
+					v.navigator.SetStatus(fmt.Sprintf("[green]Tag '%s' deleted", key))
+				}
+			})
+		}()
+	})
 }
 
 // --- Helpers ---

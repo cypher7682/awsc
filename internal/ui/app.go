@@ -496,6 +496,14 @@ func (a *App) OnConfirm(confirmed bool) {
 	}
 }
 
+// OnInput handles free-text input from the omnibox (no-op; callbacks handle it).
+func (a *App) OnInput(_ string) {}
+
+// ShowInput activates the omnibox in input mode with a prompt and callback.
+func (a *App) ShowInput(prompt, prefill string, callback func(string)) {
+	a.omnibox.SetInputPrompt(prompt, prefill, callback)
+}
+
 // globalInputHandler handles application-wide key events.
 func (a *App) globalInputHandler(event *tcell.EventKey) *tcell.EventKey {
 	// Ctrl+C always quits - no matter what

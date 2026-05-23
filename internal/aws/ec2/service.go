@@ -84,6 +84,8 @@ type EC2API interface {
 	DescribeSubnets(ctx context.Context, params *ec2.DescribeSubnetsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeSubnetsOutput, error)
 	AuthorizeSecurityGroupIngress(ctx context.Context, params *ec2.AuthorizeSecurityGroupIngressInput, optFns ...func(*ec2.Options)) (*ec2.AuthorizeSecurityGroupIngressOutput, error)
 	RevokeSecurityGroupIngress(ctx context.Context, params *ec2.RevokeSecurityGroupIngressInput, optFns ...func(*ec2.Options)) (*ec2.RevokeSecurityGroupIngressOutput, error)
+	CreateTags(ctx context.Context, params *ec2.CreateTagsInput, optFns ...func(*ec2.Options)) (*ec2.CreateTagsOutput, error)
+	DeleteTags(ctx context.Context, params *ec2.DeleteTagsInput, optFns ...func(*ec2.Options)) (*ec2.DeleteTagsOutput, error)
 }
 
 // Service provides EC2 operations.
@@ -471,4 +473,26 @@ func subnetFromAWS(sn types.Subnet) Subnet {
 	}
 
 	return subnet
+}
+
+// CreateTag adds or updates a tag on a resource.
+func (s *Service) CreateTag(ctx context.Context, resourceID, key, value string) error {
+	_, err := s.client.CreateTags(ctx, &ec2.CreateTagsInput{
+		Resources: []string{resourceID},
+		Tags: []types.Tag{
+			{Key: aws.String(key), Value: aws.String(value)},
+		},
+	})
+	return err
+}
+
+// DeleteTag removes a tag from a resource.
+func (s *Service) DeleteTag(ctx context.Context, resourceID, key string) error {
+	_, err := s.client.DeleteTags(ctx, &ec2.DeleteTagsInput{
+		Resources: []string{resourceID},
+		Tags: []types.Tag{
+			{Key: aws.String(key)},
+		},
+	})
+	return err
 }

@@ -24,6 +24,7 @@ type Navigator interface {
 	TviewApp() *tview.Application
 	Context() context.Context
 	ShowConfirm(prompt string, onConfirm func())
+	ShowInput(prompt, prefill string, callback func(string))
 	SetStatus(text string)
 	HandleAuthError(err error) bool
 }

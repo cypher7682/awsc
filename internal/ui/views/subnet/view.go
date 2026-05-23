@@ -61,6 +61,7 @@ func NewListView(navigator Navigator, vpcID string) *ListView {
 		OnStatus: navigator.SetStatus,
 	})
 	v.st.SetExtraInput(v.handleInput)
+	v.st.SetSelectedFunc(v.onSelect)
 
 	return v
 }
@@ -194,7 +195,7 @@ func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 		v.mu.RUnlock()
 
 		v.navigator.Navigate(navigation.Route{
-			Resource:   "vpc",
+			Resource:   "vpc-detail",
 			ResourceID: subnet.VPCID,
 		})
 		return nil
@@ -209,4 +210,14 @@ func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	}
 	return event
+}
+
+func (v *ListView) onSelect(_ int, id string) {
+	if id == "" {
+		return
+	}
+	v.navigator.Navigate(navigation.Route{
+		Resource:   "subnet-detail",
+		ResourceID: id,
+	})
 }

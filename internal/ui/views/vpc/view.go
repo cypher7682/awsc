@@ -180,7 +180,7 @@ func (v *ListView) onSelect(_ int, id string) {
 		return
 	}
 	v.navigator.Navigate(navigation.Route{
-		Resource: "subnet",
-		Params:   map[string]string{"vpc_id": id},
+		Resource:   "vpc-detail",
+		ResourceID: id,
 	})
 }
