@@ -57,6 +57,11 @@ type UserConfig struct {
 	// Supports placeholders: #PROFILE and #REGION which are substituted at runtime.
 	// Example: "aws sso login --profile #PROFILE"
 	LoginCmd string `yaml:"login_cmd"`
+
+	// EC2ConnectCmd is a shell command to connect (shell) to an EC2 instance.
+	// Supports placeholders: #PROFILE, #REGION, #INSTANCEID which are substituted at runtime.
+	// Example: "aws ssm start-session --target #INSTANCEID --profile #PROFILE --region #REGION"
+	EC2ConnectCmd string `yaml:"ec2_connect_cmd"`
 }
 
 // DefaultConfigPath returns the path to ~/.config/awsc/config.yaml.
@@ -102,6 +107,24 @@ func (uc *UserConfig) ResolveLoginCmd(profile, region string) string {
 // HasLoginCmd returns true if a login command is configured.
 func (uc *UserConfig) HasLoginCmd() bool {
 	return uc != nil && uc.LoginCmd != ""
+}
+
+// ResolveEC2ConnectCmd substitutes #PROFILE, #REGION, and #INSTANCEID placeholders
+// in the ec2_connect_cmd.
+func (uc *UserConfig) ResolveEC2ConnectCmd(profile, region, instanceID string) string {
+	if uc == nil || uc.EC2ConnectCmd == "" {
+		return ""
+	}
+	cmd := uc.EC2ConnectCmd
+	cmd = strings.ReplaceAll(cmd, "#PROFILE", profile)
+	cmd = strings.ReplaceAll(cmd, "#REGION", region)
+	cmd = strings.ReplaceAll(cmd, "#INSTANCEID", instanceID)
+	return cmd
+}
+
+// HasEC2ConnectCmd returns true if an EC2 connect command is configured.
+func (uc *UserConfig) HasEC2ConnectCmd() bool {
+	return uc != nil && uc.EC2ConnectCmd != ""
 }
 
 // NewAppConfig creates a new AppConfig with defaults from environment or flags.

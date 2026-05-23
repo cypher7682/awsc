@@ -250,6 +250,7 @@ func (v *DetailView) fetchMetrics() {
 func (v *DetailView) Shortcuts() []components.Shortcut {
 	return []components.Shortcut{
 		{Key: "\u2190/\u2192", Label: "tabs"},
+		{Key: "c", Label: "shell"},
 		{Key: "Del", Label: "terminate/del tag"},
 		{Key: "r", Label: "reboot"},
 		{Key: "x", Label: "stop"},
@@ -566,6 +567,9 @@ func (v *DetailView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 			v.addNewTag()
 			return nil
 		}
+	case 'c':
+		v.navigator.RunEC2ConnectCmd(v.instanceID)
+		return nil
 	case 'v':
 		if v.instance.VPCID != "" {
 			v.navigator.Navigate(navigation.Route{

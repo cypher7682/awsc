@@ -251,6 +251,38 @@ func (a *App) RunLoginCmd() bool {
 	return true
 }
 
+// RunEC2ConnectCmd suspends the TUI, runs the configured ec2_connect_cmd with
+// the given instance ID, and resumes. Returns true if the command was run.
+func (a *App) RunEC2ConnectCmd(instanceID string) bool {
+	userCfg := a.config.User
+	if !userCfg.HasEC2ConnectCmd() {
+		a.omnibox.SetStatus("[red]No ec2_connect_cmd configured in ~/.config/awsc/config.yaml")
+		return false
+	}
+
+	cmdStr := userCfg.ResolveEC2ConnectCmd(a.config.Profile, a.config.Region, instanceID)
+
+	a.tviewApp.Suspend(func() {
+		fmt.Fprintf(os.Stderr, "\n[awsc] Connecting to %s...\n", instanceID)
+		fmt.Fprintf(os.Stderr, "[awsc] Running: %s\n\n", cmdStr)
+
+		cmd := exec.Command("sh", "-c", cmdStr)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "\n[awsc] Connect command exited: %v\n", err)
+		}
+
+		fmt.Fprintf(os.Stderr, "\n[awsc] Press Enter to return to awsc...")
+		buf := make([]byte, 1)
+		os.Stdin.Read(buf)
+	})
+
+	return true
+}
+
 // HandleAuthError checks if an error is an auth failure. If a login_cmd is
 // configured, it offers to run it. Returns true if login was attempted (caller
 // should retry the operation).

@@ -147,3 +147,40 @@ sso_start_url = https://example.awsapps.com/start
 		}
 	}
 }
+
+func TestResolveEC2ConnectCmd(t *testing.T) {
+	uc := &UserConfig{
+		EC2ConnectCmd: "aws ssm start-session --target #INSTANCEID --profile #PROFILE --region #REGION",
+	}
+
+	got := uc.ResolveEC2ConnectCmd("prod", "eu-west-1", "i-abc123")
+	expected := "aws ssm start-session --target i-abc123 --profile prod --region eu-west-1"
+	if got != expected {
+		t.Errorf("expected %q, got %q", expected, got)
+	}
+}
+
+func TestResolveEC2ConnectCmd_Empty(t *testing.T) {
+	uc := &UserConfig{}
+	got := uc.ResolveEC2ConnectCmd("prod", "eu-west-1", "i-abc123")
+	if got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+}
+
+func TestHasEC2ConnectCmd(t *testing.T) {
+	uc := &UserConfig{EC2ConnectCmd: "some cmd"}
+	if !uc.HasEC2ConnectCmd() {
+		t.Error("expected HasEC2ConnectCmd to be true")
+	}
+
+	empty := &UserConfig{}
+	if empty.HasEC2ConnectCmd() {
+		t.Error("expected HasEC2ConnectCmd to be false for empty config")
+	}
+
+	var nilUc *UserConfig
+	if nilUc.HasEC2ConnectCmd() {
+		t.Error("expected HasEC2ConnectCmd to be false for nil config")
+	}
+}

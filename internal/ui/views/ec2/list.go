@@ -27,6 +27,7 @@ type Navigator interface {
 	ShowInput(prompt, prefill string, callback func(string))
 	SetStatus(text string)
 	HandleAuthError(err error) bool
+	RunEC2ConnectCmd(instanceID string) bool
 }
 
 // ec2Columns defines the column layout for the EC2 table.
@@ -118,6 +119,7 @@ func (v *ListView) Refresh(ctx context.Context) error {
 func (v *ListView) Shortcuts() []components.Shortcut {
 	sc := []components.Shortcut{
 		{Key: "Enter", Label: "details"},
+		{Key: "c", Label: "shell"},
 		{Key: "S", Label: "multi-select"},
 		{Key: "Del", Label: "terminate"},
 		{Key: "r", Label: "reboot"},
@@ -445,6 +447,22 @@ func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 				}
 			})
 		}()
+		return nil
+
+	case 'c':
+		idx := v.st.GetSelectedIndex()
+		if idx < 0 {
+			return event
+		}
+		v.mu.RLock()
+		if idx >= len(v.filtered) {
+			v.mu.RUnlock()
+			return event
+		}
+		inst := v.filtered[idx]
+		v.mu.RUnlock()
+
+		v.navigator.RunEC2ConnectCmd(inst.InstanceID)
 		return nil
 
 	case 'R':
