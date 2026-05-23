@@ -69,6 +69,11 @@ type SortableTable struct {
 	// Retained so that s/d can re-sort without the view needing to intervene.
 	sortKeyFn func(row Row) string
 
+	// Multi-select state
+	selectMode         bool
+	selected           map[string]bool
+	onSelectionChanged func(ids []string) // called when selection changes
+
 	// extraInput is an optional handler for view-specific keys.
 	// Return nil to consume the event, or the event to pass it through.
 	extraInput func(event *tcell.EventKey) *tcell.EventKey
@@ -177,9 +182,90 @@ func (st *SortableTable) SortLabel() string {
 	return st.SortColumn() + " " + st.sortDir.Symbol()
 }
 
+// --- Multi-select ---
+
+// SetSelectMode enables or disables multi-select mode.
+func (st *SortableTable) SetSelectMode(on bool) {
+	st.selectMode = on
+	if on && st.selected == nil {
+		st.selected = make(map[string]bool)
+	}
+	st.render()
+}
+
+// SelectMode returns whether multi-select mode is active.
+func (st *SortableTable) SelectMode() bool {
+	return st.selectMode
+}
+
+// ToggleSelected toggles selection for the currently highlighted row.
+func (st *SortableTable) ToggleSelected() {
+	idx := st.GetSelectedIndex()
+	if idx < 0 {
+		return
+	}
+	id := st.rows[idx].ID
+	if st.selected[id] {
+		delete(st.selected, id)
+	} else {
+		st.selected[id] = true
+	}
+	st.render()
+	st.fireSelectionChanged()
+}
+
+// SelectedIDs returns the IDs of all selected rows, in row order.
+func (st *SortableTable) SelectedIDs() []string {
+	if len(st.selected) == 0 {
+		return nil
+	}
+	var ids []string
+	for _, row := range st.rows {
+		if st.selected[row.ID] {
+			ids = append(ids, row.ID)
+		}
+	}
+	return ids
+}
+
+// SelectedCount returns the number of selected rows.
+func (st *SortableTable) SelectedCount() int {
+	return len(st.selected)
+}
+
+// ClearSelected deselects all rows.
+func (st *SortableTable) ClearSelected() {
+	st.selected = make(map[string]bool)
+	st.render()
+	st.fireSelectionChanged()
+}
+
+// SetOnSelectionChanged registers a callback fired when selections change.
+func (st *SortableTable) SetOnSelectionChanged(fn func(ids []string)) {
+	st.onSelectionChanged = fn
+}
+
+func (st *SortableTable) fireSelectionChanged() {
+	if st.onSelectionChanged != nil {
+		st.onSelectionChanged(st.SelectedIDs())
+	}
+}
+
 // render redraws the table with current data and sort.
 func (st *SortableTable) render() {
 	st.Table.Clear()
+
+	colOffset := 0
+	if st.selectMode {
+		colOffset = 1
+		// Selection column header
+		cell := tview.NewTableCell(" ").
+			SetTextColor(tcell.ColorDodgerBlue).
+			SetSelectable(false).
+			SetMaxWidth(3).
+			SetExpansion(0)
+		st.Table.SetCell(0, 0, cell)
+	}
 
 	// Header row
 	for col, c := range st.columns {
@@ -191,11 +277,25 @@ func (st *SortableTable) render() {
 			SetTextColor(tcell.ColorDodgerBlue).
 			SetSelectable(false).
 			SetExpansion(c.Expansion)
-		st.Table.SetCell(0, col, cell)
+		st.Table.SetCell(0, col+colOffset, cell)
 	}
 
 	// Data rows
 	for rowIdx, row := range st.rows {
+		if st.selectMode {
+			marker := " "
+			markerColor := tcell.ColorDarkGray
+			if st.selected[row.ID] {
+				marker = "\u2714" // ✔
+				markerColor = tcell.ColorGreen
+			}
+			cell := tview.NewTableCell(marker).
+				SetTextColor(markerColor).
+				SetMaxWidth(3).
+				SetExpansion(0)
+			st.Table.SetCell(rowIdx+1, 0, cell)
+		}
+
 		for col, text := range row.Cells {
 			color := tcell.ColorWhite
 			if col < len(row.Colors) {
@@ -211,17 +311,26 @@ func (st *SortableTable) render() {
 			cell := tview.NewTableCell(text).
 				SetTextColor(color).
 				SetExpansion(expansion)
-			st.Table.SetCell(rowIdx+1, col, cell)
+			st.Table.SetCell(rowIdx+1, col+colOffset, cell)
 		}
 	}
 
-	st.Table.SetTitle(fmt.Sprintf(" %s (%d) ", st.title, len(st.rows)))
+	titleSuffix := fmt.Sprintf("(%d)", len(st.rows))
+	if st.selectMode && len(st.selected) > 0 {
+		titleSuffix = fmt.Sprintf("(%d) [yellow]%d selected[-]", len(st.rows), len(st.selected))
+	}
+	st.Table.SetTitle(fmt.Sprintf(" %s %s ", st.title, titleSuffix))
 }
 
 // SetTitle overrides the base title (count is still appended on render).
 func (st *SortableTable) SetTitle(title string) {
 	st.title = title
-	st.Table.SetTitle(fmt.Sprintf(" %s (%d) ", st.title, len(st.rows)))
+	// Re-render title with select info if applicable
+	titleSuffix := fmt.Sprintf("(%d)", len(st.rows))
+	if st.selectMode && len(st.selected) > 0 {
+		titleSuffix = fmt.Sprintf("(%d) [yellow]%d selected[-]", len(st.rows), len(st.selected))
+	}
+	st.Table.SetTitle(fmt.Sprintf(" %s %s ", st.title, titleSuffix))
 }
 
 // SortRows sorts the rows slice in-place using the given key function,
@@ -262,8 +371,14 @@ func (st *SortableTable) doSort() {
 	st.render()
 }
 
-// handleInput processes sort keys (s/d) and delegates the rest.
+// handleInput processes sort keys (s/d), selection (Space), and delegates the rest.
 func (st *SortableTable) handleInput(event *tcell.EventKey) *tcell.EventKey {
+	// Space toggles selection in select mode
+	if st.selectMode && event.Rune() == ' ' {
+		st.ToggleSelected()
+		return nil
+	}
+
 	switch event.Rune() {
 	case 's':
 		st.sortCol = (st.sortCol + 1) % len(st.columns)

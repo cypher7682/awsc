@@ -9,6 +9,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+	"github.com/tpriestnall/awsc/internal/aws/cloudwatch"
 	"github.com/tpriestnall/awsc/internal/aws/ec2"
 	"github.com/tpriestnall/awsc/internal/navigation"
 	"github.com/tpriestnall/awsc/internal/ui/components"
@@ -17,7 +18,9 @@ import (
 // Navigator is the interface for views to navigate.
 type Navigator interface {
 	Navigate(route navigation.Route)
+	NavigateBack()
 	EC2Service() *ec2.Service
+	CloudWatchService() *cloudwatch.Service
 	TviewApp() *tview.Application
 	Context() context.Context
 	ShowConfirm(prompt string, onConfirm func())
@@ -45,6 +48,10 @@ type ListView struct {
 	instances []ec2.Instance
 	filtered  []ec2.Instance
 	filter    string
+
+	// Multi-select split view
+	layout      *tview.Flex
+	selectPanel *tview.TextView
 }
 
 // NewListView creates a new EC2 list view.
@@ -61,6 +68,20 @@ func NewListView(navigator Navigator) *ListView {
 	v.st.SetExtraInput(v.handleInput)
 	v.st.SetSelectedFunc(v.onSelect)
 
+	// Selection panel (bottom viewport, shown during multi-select)
+	v.selectPanel = tview.NewTextView()
+	v.selectPanel.SetDynamicColors(true)
+	v.selectPanel.SetBorder(true)
+	v.selectPanel.SetBorderColor(tcell.ColorYellow)
+	v.selectPanel.SetTitle(" Selected Instances ")
+	v.selectPanel.SetBackgroundColor(tcell.ColorDefault)
+
+	v.st.SetOnSelectionChanged(v.onMultiSelectChanged)
+
+	// Layout starts as table-only; split added when select mode activates
+	v.layout = tview.NewFlex().SetDirection(tview.FlexRow)
+	v.layout.AddItem(v.st.Table, 0, 1, true)
+
 	return v
 }
 
@@ -71,7 +92,7 @@ func (v *ListView) Name() string {
 
 // Render returns the tview primitive.
 func (v *ListView) Render() tview.Primitive {
-	return v.st.Table
+	return v.layout
 }
 
 // Refresh reloads instance data from AWS.
@@ -93,8 +114,9 @@ func (v *ListView) Refresh(ctx context.Context) error {
 
 // Shortcuts returns EC2-specific shortcuts.
 func (v *ListView) Shortcuts() []components.Shortcut {
-	return []components.Shortcut{
+	sc := []components.Shortcut{
 		{Key: "Enter", Label: "details"},
+		{Key: "S", Label: "multi-select"},
 		{Key: "Del", Label: "terminate"},
 		{Key: "r", Label: "reboot"},
 		{Key: "x", Label: "stop"},
@@ -105,6 +127,13 @@ func (v *ListView) Shortcuts() []components.Shortcut {
 		{Key: "R", Label: "refresh"},
 		{Key: "Esc", Label: "back"},
 	}
+	if v.st.SelectMode() {
+		sc = append([]components.Shortcut{
+			{Key: "Space", Label: "toggle"},
+			{Key: "S", Label: "exit select"},
+		}, sc[2:]...) // replace Enter/S with Space/S at front
+	}
+	return sc
 }
 
 // FilterFields returns available filter fields for EC2.
@@ -278,6 +307,12 @@ func ec2SortKey(row components.Row, col string) string {
 
 // handleInput processes view-specific key events (beyond sort).
 func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
+	// S (capital) toggles multi-select mode
+	if event.Rune() == 'S' {
+		v.toggleSelectMode()
+		return nil
+	}
+
 	// Delete key = terminate
 	if event.Key() == tcell.KeyDelete {
 		idx := v.st.GetSelectedIndex()
@@ -426,6 +461,63 @@ func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 	return event
 }
 
+// toggleSelectMode switches multi-select mode on/off.
+func (v *ListView) toggleSelectMode() {
+	newMode := !v.st.SelectMode()
+	v.st.SetSelectMode(newMode)
+
+	if newMode {
+		v.navigator.SetStatus("[yellow]Multi-select mode: Space to toggle, S to exit")
+		v.rebuildSplitLayout(true)
+	} else {
+		v.st.ClearSelected()
+		v.navigator.SetStatus("[green]Multi-select mode off")
+		v.rebuildSplitLayout(false)
+	}
+}
+
+// rebuildSplitLayout reconfigures the layout flex for split/non-split mode.
+func (v *ListView) rebuildSplitLayout(split bool) {
+	v.layout.Clear()
+	if split {
+		v.layout.AddItem(v.st.Table, 0, 2, true)
+		v.layout.AddItem(v.selectPanel, 0, 1, false)
+	} else {
+		v.layout.AddItem(v.st.Table, 0, 1, true)
+	}
+}
+
+// onMultiSelectChanged is called when multi-select checkboxes change.
+func (v *ListView) onMultiSelectChanged(ids []string) {
+	if len(ids) == 0 {
+		v.selectPanel.SetText("\n  [gray]No instances selected. Press Space to select.")
+		v.selectPanel.SetTitle(" Selected Instances ")
+		return
+	}
+
+	v.mu.RLock()
+	var b strings.Builder
+	for _, id := range ids {
+		for _, inst := range v.filtered {
+			if inst.InstanceID == id {
+				name := inst.Name
+				if name == "" {
+					name = inst.InstanceID
+				}
+				stColor := stateColor(inst.State)
+				b.WriteString(fmt.Sprintf("  [white]%s[gray] (%s) [%s]%s[-]\n",
+					name, inst.InstanceID,
+					colorName(stColor), inst.State))
+				break
+			}
+		}
+	}
+	v.mu.RUnlock()
+
+	v.selectPanel.SetTitle(fmt.Sprintf(" Selected Instances (%d) ", len(ids)))
+	v.selectPanel.SetText(b.String())
+}
+
 // onSelect handles Enter key on an instance row.
 func (v *ListView) onSelect(idx int, id string) {
 	v.mu.RLock()
@@ -463,4 +555,20 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// colorName maps tcell.Color to a tview dynamic color tag name.
+func colorName(c tcell.Color) string {
+	switch c {
+	case tcell.ColorGreen:
+		return "green"
+	case tcell.ColorRed:
+		return "red"
+	case tcell.ColorYellow:
+		return "yellow"
+	case tcell.ColorDarkGray:
+		return "gray"
+	default:
+		return "white"
+	}
 }

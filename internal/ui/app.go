@@ -10,6 +10,7 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 	awsclient "github.com/tpriestnall/awsc/internal/aws"
+	"github.com/tpriestnall/awsc/internal/aws/cloudwatch"
 	"github.com/tpriestnall/awsc/internal/aws/ec2"
 	"github.com/tpriestnall/awsc/internal/aws/ecr"
 	"github.com/tpriestnall/awsc/internal/config"
@@ -56,8 +57,9 @@ type App struct {
 	commands *navigation.CommandRegistry
 
 	// Services
-	ec2Service *ec2.Service
-	ecrService *ecr.Service
+	ec2Service  *ec2.Service
+	ecrService  *ecr.Service
+	cwService   *cloudwatch.Service
 
 	// Views
 	views        map[string]View
@@ -104,6 +106,7 @@ func NewApp(cfg *config.AppConfig) (*App, error) {
 	awsCfg := client.Config()
 	app.ec2Service = ec2.NewService(awsCfg)
 	app.ecrService = ecr.NewService(awsCfg)
+	app.cwService = cloudwatch.NewService(awsCfg)
 
 	// Set up header context
 	app.header.SetContext(cfg.Profile, cfg.Region)
@@ -123,7 +126,7 @@ func NewApp(cfg *config.AppConfig) (*App, error) {
 
 	// Build layout
 	app.layout = tview.NewFlex().SetDirection(tview.FlexRow)
-	app.layout.AddItem(app.header, 1, 0, false)
+	app.layout.AddItem(app.header.Widget(), components.HeaderHeight, 0, false)
 	app.layout.AddItem(app.pages, 0, 1, true)
 	app.layout.AddItem(app.omnibox, 1, 0, false)
 
@@ -154,7 +157,7 @@ func (a *App) Stop() {
 // rebuildLayout reconstructs the flex layout to show/hide the completion list.
 func (a *App) rebuildLayout() {
 	a.layout.Clear()
-	a.layout.AddItem(a.header, 1, 0, false)
+	a.layout.AddItem(a.header.Widget(), components.HeaderHeight, 0, false)
 	if a.completion.Visible() {
 		a.layout.AddItem(a.pages, 0, 1, true)
 		a.layout.AddItem(a.completion.Widget(), a.completion.DesiredHeight(10), 0, false)
@@ -184,6 +187,11 @@ func (a *App) EC2Service() *ec2.Service {
 // ECRService returns the ECR service instance.
 func (a *App) ECRService() *ecr.Service {
 	return a.ecrService
+}
+
+// CloudWatchService returns the CloudWatch service instance.
+func (a *App) CloudWatchService() *cloudwatch.Service {
+	return a.cwService
 }
 
 // Navigate pushes a new route and renders the corresponding view.

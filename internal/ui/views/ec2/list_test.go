@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/tpriestnall/awsc/internal/aws/ec2"
+	"github.com/tpriestnall/awsc/internal/ui/components"
 )
 
 func TestMatchesFilter_SimpleTextSearch(t *testing.T) {
@@ -134,17 +135,22 @@ func TestListView_FilterFields(t *testing.T) {
 }
 
 func TestListView_Shortcuts(t *testing.T) {
-	v := &ListView{}
+	v := &ListView{
+		st: components.NewSortableTable(components.SortableTableConfig{
+			Title:   "test",
+			Columns: ec2Columns,
+		}),
+	}
 	shortcuts := v.Shortcuts()
 	if len(shortcuts) == 0 {
 		t.Error("expected shortcuts")
 	}
-	// Should have terminate(Del), reboot(r), stop(x), start(a), sort-by(s), sort-dir(d), refresh(R)
+	// Should have terminate(Del), reboot(r), stop(x), start(a), sort-by(s), sort-dir(d), refresh(R), multi-select(S)
 	keys := make(map[string]bool)
 	for _, s := range shortcuts {
 		keys[s.Key] = true
 	}
-	expectedKeys := []string{"Del", "r", "x", "a", "s", "d", "R"}
+	expectedKeys := []string{"Del", "r", "x", "a", "s", "d", "R", "S"}
 	for _, k := range expectedKeys {
 		if !keys[k] {
 			t.Errorf("expected shortcut key '%s'", k)

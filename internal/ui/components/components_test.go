@@ -44,8 +44,8 @@ func TestHeader_SetShortcuts(t *testing.T) {
 	}
 	h.SetShortcuts(shortcuts)
 
-	if len(h.shortcuts) != 1 {
-		t.Errorf("expected 1 shortcut, got %d", len(h.shortcuts))
+	if len(h.shortcutList) != 1 {
+		t.Errorf("expected 1 shortcut, got %d", len(h.shortcutList))
 	}
 }
 
@@ -415,5 +415,194 @@ func TestTabbedView_SwitchTo(t *testing.T) {
 	tv.SwitchTo(99)
 	if tv.CurrentPageName() != "C" {
 		t.Errorf("expected still 'C', got '%s'", tv.CurrentPageName())
+	}
+}
+
+func TestSortableTable_MultiSelect(t *testing.T) {
+	st := NewSortableTable(SortableTableConfig{
+		Title:   "test",
+		Columns: []Column{{Title: "A", Field: "a", Expansion: 1}},
+	})
+
+	// Not in select mode by default
+	if st.SelectMode() {
+		t.Error("expected select mode off by default")
+	}
+	if st.SelectedCount() != 0 {
+		t.Error("expected 0 selected")
+	}
+
+	// Add rows
+	st.SetRows([]Row{
+		{ID: "1", Cells: []string{"Alpha"}},
+		{ID: "2", Cells: []string{"Beta"}},
+		{ID: "3", Cells: []string{"Charlie"}},
+	})
+
+	// Enable select mode
+	st.SetSelectMode(true)
+	if !st.SelectMode() {
+		t.Error("expected select mode on")
+	}
+
+	// Select row 0 (table starts at row 1 for data)
+	st.Table.Select(1, 0)
+	st.ToggleSelected()
+	if st.SelectedCount() != 1 {
+		t.Errorf("expected 1 selected, got %d", st.SelectedCount())
+	}
+	ids := st.SelectedIDs()
+	if len(ids) != 1 || ids[0] != "1" {
+		t.Errorf("expected ['1'], got %v", ids)
+	}
+
+	// Select another
+	st.Table.Select(3, 0)
+	st.ToggleSelected()
+	if st.SelectedCount() != 2 {
+		t.Errorf("expected 2 selected, got %d", st.SelectedCount())
+	}
+
+	// Deselect first
+	st.Table.Select(1, 0)
+	st.ToggleSelected()
+	if st.SelectedCount() != 1 {
+		t.Errorf("expected 1 selected after deselect, got %d", st.SelectedCount())
+	}
+	ids = st.SelectedIDs()
+	if len(ids) != 1 || ids[0] != "3" {
+		t.Errorf("expected ['3'], got %v", ids)
+	}
+
+	// Clear all
+	st.ClearSelected()
+	if st.SelectedCount() != 0 {
+		t.Error("expected 0 after clear")
+	}
+
+	// Disable select mode
+	st.SetSelectMode(false)
+	if st.SelectMode() {
+		t.Error("expected select mode off")
+	}
+}
+
+func TestSortableTable_OnSelectionChanged(t *testing.T) {
+	st := NewSortableTable(SortableTableConfig{
+		Title:   "test",
+		Columns: []Column{{Title: "A", Field: "a", Expansion: 1}},
+	})
+	st.SetRows([]Row{
+		{ID: "x", Cells: []string{"X"}},
+		{ID: "y", Cells: []string{"Y"}},
+	})
+	st.SetSelectMode(true)
+
+	var callbackIDs []string
+	st.SetOnSelectionChanged(func(ids []string) {
+		callbackIDs = ids
+	})
+
+	st.Table.Select(1, 0)
+	st.ToggleSelected()
+	if len(callbackIDs) != 1 || callbackIDs[0] != "x" {
+		t.Errorf("expected callback with ['x'], got %v", callbackIDs)
+	}
+}
+
+func TestChart_Creation(t *testing.T) {
+	chart := NewChart("CPUUtilization", "Percent", 0)
+	if chart == nil {
+		t.Fatal("expected non-nil chart")
+	}
+}
+
+func TestChart_SetData(t *testing.T) {
+	chart := NewChart("Test", "Percent", 0)
+	chart.SetHeight(4)
+
+	// No data
+	chart.SetData(nil)
+
+	// Some data
+	data := []ChartDatapoint{
+		{Value: 10.0, Label: "14:00"},
+		{Value: 50.0, Label: "14:05"},
+		{Value: 30.0, Label: "14:10"},
+		{Value: 80.0, Label: "14:15"},
+		{Value: 20.0, Label: "14:20"},
+	}
+	chart.SetData(data) // should not panic
+}
+
+func TestChart_ConstantData(t *testing.T) {
+	chart := NewChart("Flat", "Count", 0)
+	chart.SetHeight(4)
+
+	// All same values (edge case: valRange == 0)
+	data := []ChartDatapoint{
+		{Value: 42.0},
+		{Value: 42.0},
+		{Value: 42.0},
+	}
+	chart.SetData(data) // should not panic
+}
+
+func TestFormatValue(t *testing.T) {
+	tests := []struct {
+		value    float64
+		unit     string
+		expected string
+	}{
+		{45.2, "Percent", "45.2%"},
+		{0, "Percent", "0.0%"},
+		{100, "Count", "100"},
+		{1500, "Count", "1.5K"},
+		{2_500_000, "Count", "2.5M"},
+		{512, "Bytes", "512 B"},
+	}
+	for _, tt := range tests {
+		got := formatValue(tt.value, tt.unit)
+		if got != tt.expected {
+			t.Errorf("formatValue(%.1f, %q) = %q, want %q", tt.value, tt.unit, got, tt.expected)
+		}
+	}
+}
+
+func TestFormatBytes(t *testing.T) {
+	tests := []struct {
+		bytes    float64
+		expected string
+	}{
+		{0, "0 B"},
+		{512, "512 B"},
+		{1024, "1.0 KB"},
+		{1048576, "1.0 MB"},
+		{1073741824, "1.0 GB"},
+	}
+	for _, tt := range tests {
+		got := formatBytes(tt.bytes)
+		if got != tt.expected {
+			t.Errorf("formatBytes(%.0f) = %q, want %q", tt.bytes, got, tt.expected)
+		}
+	}
+}
+
+func TestBrailleChar(t *testing.T) {
+	// Empty grid should produce space
+	grid := make([][]bool, 4)
+	for i := range grid {
+		grid[i] = make([]bool, 2)
+	}
+	ch := brailleChar(grid, 0, 0, 4, 2)
+	if ch != ' ' {
+		t.Errorf("expected space for empty grid, got %c (U+%04X)", ch, ch)
+	}
+
+	// Single dot top-left should be braille dot 0 (U+2801)
+	grid[0][0] = true
+	ch = brailleChar(grid, 0, 0, 4, 2)
+	if ch != '\u2801' {
+		t.Errorf("expected U+2801, got U+%04X", ch)
 	}
 }

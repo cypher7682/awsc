@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+	"github.com/tpriestnall/awsc/internal/aws/cloudwatch"
 	"github.com/tpriestnall/awsc/internal/aws/ec2"
 	"github.com/tpriestnall/awsc/internal/navigation"
 	"github.com/tpriestnall/awsc/internal/ui/components"
@@ -27,6 +29,10 @@ type DetailView struct {
 	sgRules        *tview.Table
 	tagsTable      *tview.Table
 	selectedSGIdx  int
+
+	// Monitoring tab
+	monitoringPage *tview.Flex
+	charts         map[cloudwatch.EC2MetricName]*components.Chart
 }
 
 // NewDetailView creates a new EC2 detail view.
@@ -87,11 +93,42 @@ func NewDetailView(navigator Navigator, instanceID string) *DetailView {
 		Background(tcell.ColorDodgerBlue).
 		Foreground(tcell.ColorWhite))
 
+	// --- Monitoring page (CloudWatch charts) ---
+	chartColors := map[cloudwatch.EC2MetricName]tcell.Color{
+		cloudwatch.MetricCPUUtilization:    tcell.ColorDodgerBlue,
+		cloudwatch.MetricNetworkIn:         tcell.ColorGreen,
+		cloudwatch.MetricNetworkOut:        tcell.ColorDarkCyan,
+		cloudwatch.MetricDiskReadBytes:     tcell.ColorYellow,
+		cloudwatch.MetricDiskWriteBytes:    tcell.ColorOrange,
+		cloudwatch.MetricStatusCheckFailed: tcell.ColorRed,
+	}
+
+	v.charts = make(map[cloudwatch.EC2MetricName]*components.Chart)
+	// Layout: 3 rows of 2 charts each
+	v.monitoringPage = tview.NewFlex().SetDirection(tview.FlexRow)
+	metrics := cloudwatch.DefaultEC2Metrics
+	for i := 0; i < len(metrics); i += 2 {
+		row := tview.NewFlex().SetDirection(tview.FlexColumn)
+		for j := 0; j < 2 && i+j < len(metrics); j++ {
+			m := metrics[i+j]
+			color := chartColors[m]
+			if color == 0 {
+				color = tcell.ColorWhite
+			}
+			chart := components.NewChart(string(m), cloudwatch.MetricUnit[m], color)
+			chart.SetHeight(6)
+			v.charts[m] = chart
+			row.AddItem(chart, 0, 1, false)
+		}
+		v.monitoringPage.AddItem(row, 0, 1, false)
+	}
+
 	// Build tabbed view
 	v.tabs = components.NewTabbedView([]components.TabPage{
 		{Name: "Overview", Content: v.overviewPanel},
 		{Name: "Networking", Content: v.networkPanel},
 		{Name: "Security Groups", Content: sgPage},
+		{Name: "Monitoring", Content: v.monitoringPage},
 		{Name: "Tags", Content: v.tagsTable},
 	})
 	v.tabs.SetExtraInput(v.handleInput)
@@ -132,7 +169,49 @@ func (v *DetailView) Refresh(ctx context.Context) error {
 	v.renderNetworking()
 	v.renderSGList()
 	v.renderTags()
+
+	// Fetch CloudWatch metrics (non-blocking — charts render as data arrives)
+	go v.fetchMetrics()
+
 	return nil
+}
+
+// fetchMetrics loads CloudWatch data for all default EC2 metrics.
+func (v *DetailView) fetchMetrics() {
+	cwSvc := v.navigator.CloudWatchService()
+	if cwSvc == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(v.navigator.Context(), 30*time.Second)
+	defer cancel()
+
+	// 3 hours of data, 5-minute periods = ~36 data points per metric
+	results, err := cwSvc.GetEC2Metrics(ctx, v.instanceID, cloudwatch.DefaultEC2Metrics, 300, 3*time.Hour)
+	if err != nil {
+		v.navigator.TviewApp().QueueUpdateDraw(func() {
+			v.navigator.SetStatus(fmt.Sprintf("[yellow]CloudWatch: %s", err.Error()))
+		})
+		return
+	}
+
+	v.navigator.TviewApp().QueueUpdateDraw(func() {
+		for _, result := range results {
+			metricName := cloudwatch.EC2MetricName(result.Label)
+			chart, ok := v.charts[metricName]
+			if !ok {
+				continue
+			}
+			datapoints := make([]components.ChartDatapoint, len(result.Datapoints))
+			for i, dp := range result.Datapoints {
+				datapoints[i] = components.ChartDatapoint{
+					Value: dp.Value,
+					Label: dp.Timestamp.Format("15:04"),
+				}
+			}
+			chart.SetData(datapoints)
+		}
+	})
 }
 
 // Shortcuts returns detail view shortcuts.
