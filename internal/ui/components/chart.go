@@ -19,11 +19,13 @@ type ChartDatapoint struct {
 // Braille chars give 2x4 dot resolution per terminal cell (2 wide, 4 tall).
 type Chart struct {
 	*tview.TextView
-	title  string
-	unit   string
-	data   []ChartDatapoint
-	color  tcell.Color
-	height int // chart area height in terminal rows
+	title      string
+	unit       string
+	data       []ChartDatapoint
+	color      tcell.Color
+	height     int // chart area height in terminal rows (0 = auto from allocated space)
+	lastWidth  int // cached allocated width for re-render detection
+	lastHeight int // cached allocated height for re-render detection
 }
 
 // NewChart creates a new chart widget.
@@ -40,13 +42,32 @@ func NewChart(title, unit string, color tcell.Color) *Chart {
 		title:    title,
 		unit:     unit,
 		color:    color,
-		height:   8, // default chart height
+		height:   0, // auto: fill available space
 	}
 }
 
-// SetHeight sets the chart area height in terminal rows.
+// SetHeight sets a fixed chart area height in terminal rows.
+// Pass 0 to use auto-sizing (fill available space).
 func (c *Chart) SetHeight(h int) {
 	c.height = h
+}
+
+// Draw overrides tview.TextView.Draw to re-render the chart at the correct
+// size when the allocated rectangle changes.
+func (c *Chart) Draw(screen tcell.Screen) {
+	// Get inner rect (minus border/padding)
+	x, y, w, h := c.GetInnerRect()
+	_ = x
+	_ = y
+
+	// Re-render if the allocated size changed and we have data
+	if (w != c.lastWidth || h != c.lastHeight) && len(c.data) > 0 {
+		c.lastWidth = w
+		c.lastHeight = h
+		c.render()
+	}
+
+	c.TextView.Draw(screen)
 }
 
 // SetData sets the data points and re-renders the chart.
@@ -66,6 +87,28 @@ func (c *Chart) render() {
 	if len(c.data) == 0 {
 		c.SetText("\n  [gray]No data available")
 		return
+	}
+
+	// Determine chart height: use allocated space if auto (height==0)
+	chartHeight := c.height
+	if chartHeight <= 0 {
+		// lastHeight is the inner height (rows available inside border).
+		// Reserve 1 row for the summary line at the bottom.
+		chartHeight = c.lastHeight - 1
+		if chartHeight < 3 {
+			chartHeight = 3
+		}
+	}
+
+	// Determine chart width: use allocated inner width for data point scaling
+	chartWidth := c.lastWidth
+	if chartWidth <= 0 {
+		chartWidth = len(c.data) // fallback
+	}
+	// Subtract Y-axis label width ("  12.3K ") = 8 chars
+	plotWidth := chartWidth - 8
+	if plotWidth < 4 {
+		plotWidth = 4
 	}
 
 	// Find min/max for scaling
@@ -104,19 +147,36 @@ func (c *Chart) render() {
 	colorTag := colorTagFromTcell(c.color)
 
 	// Braille-based rendering: each cell is 2 dots wide x 4 dots tall
-	// Chart area height in dots = height * 4
-	dotHeight := c.height * 4
-	numPoints := len(c.data)
-
-	// Build a grid: dotHeight rows x numPoints columns of booleans
-	grid := make([][]bool, dotHeight)
-	for y := range grid {
-		grid[y] = make([]bool, numPoints)
+	// Chart area height in dots = chartHeight * 4
+	dotHeight := chartHeight * 4
+	// Plot width in braille dots (2 dots per cell)
+	dotWidth := plotWidth * 2
+	if dotWidth < 4 {
+		dotWidth = 4
 	}
 
-	// Fill the grid: for each data point, fill dots from bottom up to value
-	for x, d := range c.data {
-		normalised := (d.Value - minVal) / valRange
+	// Build a grid: dotHeight rows x dotWidth columns of booleans
+	grid := make([][]bool, dotHeight)
+	for y := range grid {
+		grid[y] = make([]bool, dotWidth)
+	}
+
+	numPoints := len(c.data)
+
+	// Fill the grid: map each dot-column to a data point (linear interpolation)
+	for x := 0; x < dotWidth; x++ {
+		// Map dot column to data index
+		dataIdx := float64(x) * float64(numPoints-1) / float64(dotWidth-1)
+		// Interpolate between adjacent data points
+		idx0 := int(dataIdx)
+		idx1 := idx0 + 1
+		if idx1 >= numPoints {
+			idx1 = numPoints - 1
+		}
+		frac := dataIdx - float64(idx0)
+		value := c.data[idx0].Value*(1-frac) + c.data[idx1].Value*frac
+
+		normalised := (value - minVal) / valRange
 		dotY := int(normalised * float64(dotHeight-1))
 		// Fill from bottom (dotHeight-1) up to the value level
 		for y := dotHeight - 1; y >= dotHeight-1-dotY; y-- {
@@ -128,7 +188,7 @@ func (c *Chart) render() {
 
 	// Convert grid to braille characters
 	// Each braille cell covers 2 columns x 4 rows of dots
-	brailleCols := (numPoints + 1) / 2
+	brailleCols := (dotWidth + 1) / 2
 	brailleRows := (dotHeight + 3) / 4
 
 	var b strings.Builder
@@ -148,7 +208,7 @@ func (c *Chart) render() {
 		}
 
 		for bx := 0; bx < brailleCols; bx++ {
-			b.WriteRune(brailleChar(grid, bx*2, by*4, dotHeight, numPoints))
+			b.WriteRune(brailleChar(grid, bx*2, by*4, dotHeight, dotWidth))
 		}
 		b.WriteString("[-]\n")
 	}

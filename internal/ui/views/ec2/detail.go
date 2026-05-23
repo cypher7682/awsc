@@ -116,7 +116,6 @@ func NewDetailView(navigator Navigator, instanceID string) *DetailView {
 				color = tcell.ColorWhite
 			}
 			chart := components.NewChart(string(m), cloudwatch.MetricUnit[m], color)
-			chart.SetHeight(6)
 			v.charts[m] = chart
 			row.AddItem(chart, 0, 1, false)
 		}
