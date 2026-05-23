@@ -154,10 +154,9 @@ func (v *ListView) rebuildRows() {
 		}
 	}
 
-	col := v.st.SortColumn()
 	v.st.SetRows(rows)
-	v.st.SortRows(func(row components.Row) string {
-		return subnetSortKey(row, col)
+	v.st.SetSortKeyFn(func(row components.Row, field string) string {
+		return subnetSortKey(row, field)
 	})
 }
 

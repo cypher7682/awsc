@@ -65,6 +65,10 @@ type SortableTable struct {
 	title    string
 	onStatus StatusReporter
 
+	// sortKeyFn extracts a sort key from a row. Set via SortRows().
+	// Retained so that s/d can re-sort without the view needing to intervene.
+	sortKeyFn func(row Row) string
+
 	// extraInput is an optional handler for view-specific keys.
 	// Return nil to consume the event, or the event to pass it through.
 	extraInput func(event *tcell.EventKey) *tcell.EventKey
@@ -222,8 +226,31 @@ func (st *SortableTable) SetTitle(title string) {
 
 // SortRows sorts the rows slice in-place using the given key function,
 // respecting the current sort direction, then re-renders.
+// The key function is retained so that subsequent s/d key presses
+// can re-sort without requiring the view to intervene.
 func (st *SortableTable) SortRows(keyFn func(row Row) string) {
+	st.sortKeyFn = keyFn
+	st.doSort()
+}
+
+// SetSortKeyFn sets a sort key function that maps a Row + column field
+// to a sort key string. This is called on every sort (including when the
+// user presses s/d to change column or direction). Triggers an immediate sort.
+func (st *SortableTable) SetSortKeyFn(fn func(row Row, field string) string) {
+	st.sortKeyFn = func(row Row) string {
+		return fn(row, st.columns[st.sortCol].Field)
+	}
+	st.doSort()
+}
+
+// doSort sorts rows using the stored key function and re-renders.
+func (st *SortableTable) doSort() {
+	if st.sortKeyFn == nil {
+		st.render()
+		return
+	}
 	dir := st.sortDir
+	keyFn := st.sortKeyFn
 	sort.SliceStable(st.rows, func(i, j int) bool {
 		ki := keyFn(st.rows[i])
 		kj := keyFn(st.rows[j])
@@ -243,7 +270,7 @@ func (st *SortableTable) handleInput(event *tcell.EventKey) *tcell.EventKey {
 		if st.onStatus != nil {
 			st.onStatus(fmt.Sprintf("[dodgerblue]Sort: %s", st.SortLabel()))
 		}
-		st.render()
+		st.doSort()
 		return nil
 	case 'd':
 		if st.sortDir == SortAsc {
@@ -254,7 +281,7 @@ func (st *SortableTable) handleInput(event *tcell.EventKey) *tcell.EventKey {
 		if st.onStatus != nil {
 			st.onStatus(fmt.Sprintf("[dodgerblue]Sort: %s", st.SortLabel()))
 		}
-		st.render()
+		st.doSort()
 		return nil
 	}
 

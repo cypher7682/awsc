@@ -158,10 +158,9 @@ func (v *ListView) rebuildRows() {
 		}
 	}
 
-	col := v.st.SortColumn()
 	v.st.SetRows(rows)
-	v.st.SortRows(func(row components.Row) string {
-		return ecrSortKey(row, col)
+	v.st.SetSortKeyFn(func(row components.Row, field string) string {
+		return ecrSortKey(row, field)
 	})
 }
 
@@ -368,10 +367,9 @@ func (v *ImageView) rebuildRows() {
 		}
 	}
 
-	col := v.st.SortColumn()
 	v.st.SetRows(rows)
-	v.st.SortRows(func(row components.Row) string {
-		return ecrImageSortKey(row, col)
+	v.st.SetSortKeyFn(func(row components.Row, field string) string {
+		return ecrImageSortKey(row, field)
 	})
 }
 

@@ -249,11 +249,10 @@ func (v *ListView) rebuildRows() {
 		}
 	}
 
-	// Sort using the table's current sort state
-	col := v.st.SortColumn()
+	// Set rows and configure sort - SetSortKeyFn is retained for s/d re-sorting
 	v.st.SetRows(rows)
-	v.st.SortRows(func(row components.Row) string {
-		return ec2SortKey(row, col)
+	v.st.SetSortKeyFn(func(row components.Row, field string) string {
+		return ec2SortKey(row, field)
 	})
 
 	// Update title with filter info

@@ -156,10 +156,9 @@ func (v *ListView) rebuildRows() {
 		}
 	}
 
-	col := v.st.SortColumn()
 	v.st.SetRows(rows)
-	v.st.SortRows(func(row components.Row) string {
-		return sgSortKey(row, col)
+	v.st.SetSortKeyFn(func(row components.Row, field string) string {
+		return sgSortKey(row, field)
 	})
 }
 
