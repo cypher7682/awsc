@@ -1,5 +1,7 @@
 # awsc - AWS Console in your Terminal
 
+> **This project is entirely AI-generated code.** Every line was written by an AI assistant (Claude/Copilot) with human direction. It should be used with absolute caution — there may be bugs, edge cases, or unexpected behaviours. The code is free for anyone to browse, use, fork, and raise issues or PRs against. Contributions and feedback are welcome.
+
 A full-screen terminal UI for AWS, inspired by [K9s](https://k9scli.io/). Navigate your AWS resources like you would in the console, but from your terminal with vim-style keybindings.
 
 ```
@@ -71,33 +73,42 @@ awsc uses a K9s-style command system:
 | Key | Action |
 |-----|--------|
 | `Enter` | View instance details |
-| `t` | Terminate instance |
+| `Del` | Terminate instance |
 | `r` | Reboot instance |
-| `s` | Stop instance |
-| `S` | Start instance |
+| `x` | Stop instance |
+| `a` | Start instance |
+| `s` | Cycle sort column |
+| `d` | Toggle sort direction |
+| `S` | Toggle multi-select mode |
+| `Space` | Toggle selection (in multi-select) |
 | `R` | Refresh list |
 
 ### EC2 Instance Detail
 | Key | Action |
 |-----|--------|
-| `Enter` | Open selected security group |
+| `Left/Right` | Switch tab (Overview, Networking, Security Groups, Monitoring, Tags) |
+| `Del` | Terminate instance |
+| `r` | Reboot instance |
+| `x` | Stop instance |
+| `a` | Start instance |
 | `v` | Navigate to VPC |
 | `n` | Navigate to subnet |
-| `t` | Terminate instance |
-| `r` | Reboot instance |
 
 ### ECR Repositories
 | Key | Action |
 |-----|--------|
 | `Enter` | View images |
-| `d` | Delete repository |
+| `Del` | Delete repository |
+| `s` | Cycle sort column |
+| `d` | Toggle sort direction |
 | `R` | Refresh list |
 
 ### Security Groups
 | Key | Action |
 |-----|--------|
-| `Enter` | View rules detail |
 | `v` | Navigate to VPC |
+| `s` | Cycle sort column |
+| `d` | Toggle sort direction |
 | `R` | Refresh list |
 
 ## Filtering
@@ -157,14 +168,16 @@ internal/
   aws/                 - AWS client management
     ec2/               - EC2 service layer (API calls, data models)
     ecr/               - ECR service layer
+    cloudwatch/        - CloudWatch service layer (metrics)
   config/              - App configuration (profiles, regions)
   navigation/          - Route stack, command registry
   ui/
     app.go             - Main TUI application shell
-    components/        - Reusable widgets (header, omnibox)
+    components/        - Reusable widgets (header, omnibox, sortable table,
+                         tabbed view, completion list, braille charts)
     views/             - Resource-specific views
       services/        - Service listing (home)
-      ec2/             - EC2 list + detail views
+      ec2/             - EC2 list + detail views (with monitoring charts)
       ecr/             - ECR list + image views
       sg/              - Security Groups view
       vpc/             - VPC view
