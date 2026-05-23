@@ -36,6 +36,10 @@ type View interface {
 	HandleFilter(expression string)
 }
 
+// ViewFactory creates a view dynamically based on the route (e.g., detail views
+// that need a ResourceID at construction time).
+type ViewFactory func(route navigation.Route) View
+
 // App is the main TUI application.
 type App struct {
 	tviewApp   *tview.Application
@@ -56,8 +60,9 @@ type App struct {
 	ecrService *ecr.Service
 
 	// Views
-	views       map[string]View
-	currentView View
+	views        map[string]View
+	viewFactories map[string]ViewFactory
+	currentView  View
 
 	// Confirmation callback
 	confirmCallback func()
@@ -90,6 +95,7 @@ func NewApp(cfg *config.AppConfig) (*App, error) {
 		nav:        navigation.NewStack(),
 		commands:   navigation.NewCommandRegistry(),
 		views:      make(map[string]View),
+		viewFactories: make(map[string]ViewFactory),
 		ctx:        ctx,
 		cancel:     cancel,
 	}
@@ -164,6 +170,12 @@ func (a *App) RegisterView(view View) {
 	a.views[view.Name()] = view
 }
 
+// RegisterViewFactory registers a factory for dynamically-created views
+// (e.g., detail views that require a ResourceID at construction time).
+func (a *App) RegisterViewFactory(name string, factory ViewFactory) {
+	a.viewFactories[name] = factory
+}
+
 // EC2Service returns the EC2 service instance.
 func (a *App) EC2Service() *ec2.Service {
 	return a.ec2Service
@@ -218,8 +230,20 @@ func (a *App) navigate(route navigation.Route) {
 	viewName := route.Resource
 	view, ok := a.views[viewName]
 	if !ok {
-		a.omnibox.SetStatus(fmt.Sprintf("[red]Unknown resource: %s", viewName))
-		return
+		// Try factory for dynamic views (e.g., detail views needing a ResourceID)
+		factory, hasFactory := a.viewFactories[viewName]
+		if hasFactory {
+			view = factory(route)
+			// Cache it so back-navigation reuses the same instance
+			a.views[viewName+":"+route.ResourceID] = view
+		} else {
+			// Also check cached dynamic views
+			view, ok = a.views[viewName+":"+route.ResourceID]
+			if !ok {
+				a.omnibox.SetStatus(fmt.Sprintf("[red]Unknown resource: %s", viewName))
+				return
+			}
+		}
 	}
 
 	a.currentView = view

@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/tpriestnall/awsc/internal/config"
+	"github.com/tpriestnall/awsc/internal/navigation"
 	"github.com/tpriestnall/awsc/internal/ui"
 	ec2view "github.com/tpriestnall/awsc/internal/ui/views/ec2"
 	ecrview "github.com/tpriestnall/awsc/internal/ui/views/ecr"
@@ -47,6 +48,11 @@ func main() {
 	app.RegisterView(sgview.NewListView(app))
 	app.RegisterView(vpcview.NewListView(app))
 	app.RegisterView(subnetview.NewListView(app, ""))
+
+	// Register view factories (dynamic views needing route params)
+	app.RegisterViewFactory("ec2-detail", func(route navigation.Route) ui.View {
+		return ec2view.NewDetailView(app, route.ResourceID)
+	})
 
 	if err := app.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
