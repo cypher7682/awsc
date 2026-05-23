@@ -55,6 +55,12 @@ func (c *Chart) SetData(data []ChartDatapoint) {
 	c.render()
 }
 
+// SetError displays an error message on the chart.
+func (c *Chart) SetError(msg string) {
+	c.SetText(fmt.Sprintf("\n  [red]%s", msg))
+	c.SetTitle(fmt.Sprintf(" %s [red](error)[-] ", c.title))
+}
+
 // render draws the chart using braille characters.
 func (c *Chart) render() {
 	if len(c.data) == 0 {

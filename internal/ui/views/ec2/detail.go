@@ -189,8 +189,13 @@ func (v *DetailView) fetchMetrics() {
 	// 3 hours of data, 5-minute periods = ~36 data points per metric
 	results, err := cwSvc.GetEC2Metrics(ctx, v.instanceID, cloudwatch.DefaultEC2Metrics, 300, 3*time.Hour)
 	if err != nil {
+		// Show a friendly error on each chart widget
+		errMsg := simplifyCloudWatchError(err)
 		v.navigator.TviewApp().QueueUpdateDraw(func() {
-			v.navigator.SetStatus(fmt.Sprintf("[yellow]CloudWatch: %s", err.Error()))
+			for _, chart := range v.charts {
+				chart.SetError(errMsg)
+			}
+			v.navigator.SetStatus(fmt.Sprintf("[yellow]CloudWatch: %s", errMsg))
 		})
 		return
 	}
@@ -536,4 +541,26 @@ func formatPorts(from, to int32) string {
 		return fmt.Sprintf("%d", from)
 	}
 	return fmt.Sprintf("%d-%d", from, to)
+}
+
+// simplifyCloudWatchError returns a user-friendly error message.
+func simplifyCloudWatchError(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "no EC2 IMDS role found") ||
+		strings.Contains(msg, "get credentials") ||
+		strings.Contains(msg, "failed to refresh cached credentials"):
+		return "AWS credentials not configured (run aws sso login or set credentials)"
+	case strings.Contains(msg, "context deadline exceeded"):
+		return "Request timed out"
+	case strings.Contains(msg, "AccessDenied") ||
+		strings.Contains(msg, "UnauthorizedAccess"):
+		return "Access denied (missing cloudwatch:GetMetricData permission)"
+	default:
+		// Truncate long messages
+		if len(msg) > 80 {
+			return msg[:80] + "..."
+		}
+		return msg
+	}
 }
