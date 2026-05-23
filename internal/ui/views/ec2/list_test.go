@@ -139,12 +139,12 @@ func TestListView_Shortcuts(t *testing.T) {
 	if len(shortcuts) == 0 {
 		t.Error("expected shortcuts")
 	}
-	// Should have at least terminate, reboot, stop, start
+	// Should have terminate(Del), reboot(r), stop(x), start(a), sort-by(s), sort-dir(d), refresh(R)
 	keys := make(map[string]bool)
 	for _, s := range shortcuts {
 		keys[s.Key] = true
 	}
-	expectedKeys := []string{"t", "r", "s", "S", "R"}
+	expectedKeys := []string{"Del", "r", "x", "a", "s", "d", "R"}
 	for _, k := range expectedKeys {
 		if !keys[k] {
 			t.Errorf("expected shortcut key '%s'", k)

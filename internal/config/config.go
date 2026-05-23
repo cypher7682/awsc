@@ -2,9 +2,12 @@
 package config
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -94,4 +97,67 @@ func (c *AppConfig) LoadAWSConfig(ctx context.Context) (aws.Config, error) {
 		opts = append(opts, config.WithSharedConfigProfile(c.Profile))
 	}
 	return config.LoadDefaultConfig(ctx, opts...)
+}
+
+// LoadProfiles returns all AWS profile names from ~/.aws/credentials and ~/.aws/config.
+func LoadProfiles() []string {
+	seen := make(map[string]bool)
+	var profiles []string
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return []string{"default"}
+	}
+
+	// Parse ~/.aws/credentials — sections are [profile_name]
+	credPath := filepath.Join(homeDir, ".aws", "credentials")
+	for _, name := range parseINISections(credPath, false) {
+		if !seen[name] {
+			seen[name] = true
+			profiles = append(profiles, name)
+		}
+	}
+
+	// Parse ~/.aws/config — sections are [profile profile_name] (except [default])
+	configPath := filepath.Join(homeDir, ".aws", "config")
+	for _, name := range parseINISections(configPath, true) {
+		if !seen[name] {
+			seen[name] = true
+			profiles = append(profiles, name)
+		}
+	}
+
+	if len(profiles) == 0 {
+		return []string{"default"}
+	}
+	return profiles
+}
+
+// parseINISections extracts section names from an INI-style file.
+// If stripProfilePrefix is true, it strips the "profile " prefix from section
+// headers (as used in ~/.aws/config).
+func parseINISections(path string, stripProfilePrefix bool) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var sections []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "[") || !strings.HasSuffix(line, "]") {
+			continue
+		}
+		name := line[1 : len(line)-1]
+		if stripProfilePrefix {
+			name = strings.TrimPrefix(name, "profile ")
+		}
+		name = strings.TrimSpace(name)
+		if name != "" {
+			sections = append(sections, name)
+		}
+	}
+	return sections
 }

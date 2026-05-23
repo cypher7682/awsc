@@ -4,6 +4,7 @@ package subnetview
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/gdamore/tcell/v2"
@@ -22,9 +23,19 @@ type Navigator interface {
 	SetStatus(text string)
 }
 
+var subnetColumns = []components.Column{
+	{Title: "SUBNET ID", Field: "subnet_id", Expansion: 1},
+	{Title: "NAME", Field: "name", Expansion: 1},
+	{Title: "VPC ID", Field: "vpc_id", Expansion: 1},
+	{Title: "CIDR", Field: "cidr", Expansion: 1},
+	{Title: "AZ", Field: "az", Expansion: 1},
+	{Title: "AVAILABLE IPs", Field: "available_ips", Expansion: 1},
+	{Title: "PUBLIC IP", Field: "public_ip", Expansion: 1},
+}
+
 // ListView displays subnets.
 type ListView struct {
-	table     *tview.Table
+	st        *components.SortableTable
 	navigator Navigator
 	vpcID     string // optional filter by VPC
 
@@ -34,28 +45,22 @@ type ListView struct {
 
 // NewListView creates a new subnet list view.
 func NewListView(navigator Navigator, vpcID string) *ListView {
-	table := tview.NewTable()
-	table.SetBorders(false)
-	table.SetSelectable(true, false)
-	table.SetBorder(true)
-	table.SetBorderColor(tcell.ColorDodgerBlue)
-	table.SetSelectedStyle(tcell.StyleDefault.
-		Background(tcell.ColorDodgerBlue).
-		Foreground(tcell.ColorWhite))
-
-	title := " Subnets "
+	title := "Subnets"
 	if vpcID != "" {
-		title = fmt.Sprintf(" Subnets (%s) ", vpcID)
+		title = fmt.Sprintf("Subnets (%s)", vpcID)
 	}
-	table.SetTitle(title)
 
 	v := &ListView{
-		table:     table,
 		navigator: navigator,
 		vpcID:     vpcID,
 	}
 
-	table.SetInputCapture(v.handleInput)
+	v.st = components.NewSortableTable(components.SortableTableConfig{
+		Title:    title,
+		Columns:  subnetColumns,
+		OnStatus: navigator.SetStatus,
+	})
+	v.st.SetExtraInput(v.handleInput)
 
 	return v
 }
@@ -67,7 +72,7 @@ func (v *ListView) Name() string {
 
 // Render returns the tview primitive.
 func (v *ListView) Render() tview.Primitive {
-	return v.table
+	return v.st.Table
 }
 
 // Refresh reloads subnet data from AWS.
@@ -82,7 +87,7 @@ func (v *ListView) Refresh(ctx context.Context) error {
 	v.subnets = subnets
 	v.mu.Unlock()
 
-	v.renderTable()
+	v.rebuildRows()
 	return nil
 }
 
@@ -90,6 +95,8 @@ func (v *ListView) Refresh(ctx context.Context) error {
 func (v *ListView) Shortcuts() []components.Shortcut {
 	return []components.Shortcut{
 		{Key: "v", Label: "goto VPC"},
+		{Key: "s", Label: "sort-by"},
+		{Key: "d", Label: "sort-dir"},
 		{Key: "/", Label: "filter"},
 		{Key: "R", Label: "refresh"},
 		{Key: "Esc", Label: "back"},
@@ -104,54 +111,82 @@ func (v *ListView) FilterFields() []string {
 // HandleFilter applies a filter.
 func (v *ListView) HandleFilter(_ string) {}
 
-// renderTable rebuilds the table display.
-func (v *ListView) renderTable() {
+// rebuildRows converts subnets into table rows and applies sort.
+func (v *ListView) rebuildRows() {
 	v.mu.RLock()
-	subnets := v.subnets
+	subnets := make([]ec2.Subnet, len(v.subnets))
+	copy(subnets, v.subnets)
 	v.mu.RUnlock()
 
-	v.table.Clear()
-
-	headers := []string{"SUBNET ID", "NAME", "VPC ID", "CIDR", "AZ", "AVAILABLE IPs", "PUBLIC IP"}
-	for col, h := range headers {
-		cell := tview.NewTableCell(h).
-			SetTextColor(tcell.ColorDodgerBlue).
-			SetSelectable(false).
-			SetExpansion(1)
-		v.table.SetCell(0, col, cell)
-	}
-
-	for row, sn := range subnets {
+	rows := make([]components.Row, len(subnets))
+	for i, sn := range subnets {
 		name := sn.Name
 		if name == "" {
 			name = "-"
 		}
 		publicIP := "No"
+		publicColor := tcell.ColorLightGray
 		if sn.MapPublicIP {
-			publicIP = "[green]Yes"
+			publicIP = "Yes"
+			publicColor = tcell.ColorGreen
 		}
 
-		v.table.SetCell(row+1, 0, tview.NewTableCell(sn.SubnetID).SetTextColor(tcell.ColorWhite).SetExpansion(1))
-		v.table.SetCell(row+1, 1, tview.NewTableCell(name).SetTextColor(tcell.ColorLightGray).SetExpansion(1))
-		v.table.SetCell(row+1, 2, tview.NewTableCell(sn.VPCID).SetTextColor(tcell.ColorLightGray).SetExpansion(1))
-		v.table.SetCell(row+1, 3, tview.NewTableCell(sn.CIDRBlock).SetTextColor(tcell.ColorLightGray).SetExpansion(1))
-		v.table.SetCell(row+1, 4, tview.NewTableCell(sn.AZ).SetTextColor(tcell.ColorLightGray).SetExpansion(1))
-		v.table.SetCell(row+1, 5, tview.NewTableCell(fmt.Sprintf("%d", sn.AvailableIPs)).SetTextColor(tcell.ColorYellow).SetExpansion(1))
-		v.table.SetCell(row+1, 6, tview.NewTableCell(publicIP).SetExpansion(1))
+		rows[i] = components.Row{
+			ID: sn.SubnetID,
+			Cells: []string{
+				sn.SubnetID,
+				name,
+				sn.VPCID,
+				sn.CIDRBlock,
+				sn.AZ,
+				fmt.Sprintf("%d", sn.AvailableIPs),
+				publicIP,
+			},
+			Colors: []tcell.Color{
+				tcell.ColorWhite,
+				tcell.ColorLightGray,
+				tcell.ColorLightGray,
+				tcell.ColorLightGray,
+				tcell.ColorLightGray,
+				tcell.ColorYellow,
+				publicColor,
+			},
+		}
 	}
 
-	v.table.SetTitle(fmt.Sprintf(" Subnets (%d) ", len(subnets)))
+	col := v.st.SortColumn()
+	v.st.SetRows(rows)
+	v.st.SortRows(func(row components.Row) string {
+		return subnetSortKey(row, col)
+	})
+}
+
+func subnetSortKey(row components.Row, col string) string {
+	idx := -1
+	for i, c := range subnetColumns {
+		if c.Field == col {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 || idx >= len(row.Cells) {
+		return ""
+	}
+	// Zero-pad numeric fields
+	if col == "available_ips" {
+		return fmt.Sprintf("%010s", row.Cells[idx])
+	}
+	return strings.ToLower(row.Cells[idx])
 }
 
 func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 	switch event.Rune() {
 	case 'v':
-		row, _ := v.table.GetSelection()
-		if row <= 0 {
+		idx := v.st.GetSelectedIndex()
+		if idx < 0 {
 			return event
 		}
 		v.mu.RLock()
-		idx := row - 1
 		if idx >= len(v.subnets) {
 			v.mu.RUnlock()
 			return event

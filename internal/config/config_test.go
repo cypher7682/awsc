@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -83,5 +84,66 @@ func TestSetProfile(t *testing.T) {
 	cfg.SetProfile("production")
 	if cfg.Profile != "production" {
 		t.Errorf("expected profile 'production', got '%s'", cfg.Profile)
+	}
+}
+
+func TestLoadProfiles_FromCredentials(t *testing.T) {
+	// Create a temp dir with a fake credentials file
+	tmpDir := t.TempDir()
+	credContent := `[default]
+aws_access_key_id = AKIA123
+aws_secret_access_key = secret
+
+[staging]
+aws_access_key_id = AKIA456
+aws_secret_access_key = secret2
+
+[production]
+aws_access_key_id = AKIA789
+aws_secret_access_key = secret3
+`
+	credPath := filepath.Join(tmpDir, "credentials")
+	if err := os.WriteFile(credPath, []byte(credContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	sections := parseINISections(credPath, false)
+	expected := []string{"default", "staging", "production"}
+	if len(sections) != len(expected) {
+		t.Fatalf("expected %d sections, got %d: %v", len(expected), len(sections), sections)
+	}
+	for i, s := range sections {
+		if s != expected[i] {
+			t.Errorf("section %d: expected '%s', got '%s'", i, expected[i], s)
+		}
+	}
+}
+
+func TestLoadProfiles_FromConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	configContent := `[default]
+region = us-east-1
+
+[profile staging]
+region = eu-west-1
+
+[profile production]
+region = us-west-2
+sso_start_url = https://example.awsapps.com/start
+`
+	configPath := filepath.Join(tmpDir, "config")
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	sections := parseINISections(configPath, true)
+	expected := []string{"default", "staging", "production"}
+	if len(sections) != len(expected) {
+		t.Fatalf("expected %d sections, got %d: %v", len(expected), len(sections), sections)
+	}
+	for i, s := range sections {
+		if s != expected[i] {
+			t.Errorf("section %d: expected '%s', got '%s'", i, expected[i], s)
+		}
 	}
 }

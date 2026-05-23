@@ -23,9 +23,18 @@ type Navigator interface {
 	SetStatus(text string)
 }
 
+var sgColumns = []components.Column{
+	{Title: "SG ID", Field: "sg_id", Expansion: 1},
+	{Title: "NAME", Field: "name", Expansion: 1},
+	{Title: "VPC ID", Field: "vpc_id", Expansion: 1},
+	{Title: "INBOUND RULES", Field: "inbound", Expansion: 1},
+	{Title: "OUTBOUND RULES", Field: "outbound", Expansion: 1},
+	{Title: "DESCRIPTION", Field: "description", Expansion: 1},
+}
+
 // ListView displays security groups.
 type ListView struct {
-	table     *tview.Table
+	st        *components.SortableTable
 	navigator Navigator
 
 	mu     sync.RWMutex
@@ -35,23 +44,17 @@ type ListView struct {
 
 // NewListView creates a new security groups list view.
 func NewListView(navigator Navigator) *ListView {
-	table := tview.NewTable()
-	table.SetBorders(false)
-	table.SetSelectable(true, false)
-	table.SetTitle(" Security Groups ")
-	table.SetBorder(true)
-	table.SetBorderColor(tcell.ColorDodgerBlue)
-	table.SetSelectedStyle(tcell.StyleDefault.
-		Background(tcell.ColorDodgerBlue).
-		Foreground(tcell.ColorWhite))
-
 	v := &ListView{
-		table:     table,
 		navigator: navigator,
 	}
 
-	table.SetInputCapture(v.handleInput)
-	table.SetSelectedFunc(v.onSelect)
+	v.st = components.NewSortableTable(components.SortableTableConfig{
+		Title:    "Security Groups",
+		Columns:  sgColumns,
+		OnStatus: navigator.SetStatus,
+	})
+	v.st.SetExtraInput(v.handleInput)
+	v.st.SetSelectedFunc(v.onSelect)
 
 	return v
 }
@@ -63,7 +66,7 @@ func (v *ListView) Name() string {
 
 // Render returns the tview primitive.
 func (v *ListView) Render() tview.Primitive {
-	return v.table
+	return v.st.Table
 }
 
 // Refresh reloads security group data from AWS.
@@ -78,7 +81,7 @@ func (v *ListView) Refresh(ctx context.Context) error {
 	v.groups = groups
 	v.mu.Unlock()
 
-	v.renderTable()
+	v.rebuildRows()
 	return nil
 }
 
@@ -87,6 +90,8 @@ func (v *ListView) Shortcuts() []components.Shortcut {
 	return []components.Shortcut{
 		{Key: "Enter", Label: "rules"},
 		{Key: "v", Label: "goto VPC"},
+		{Key: "s", Label: "sort-by"},
+		{Key: "d", Label: "sort-dir"},
 		{Key: "/", Label: "filter"},
 		{Key: "R", Label: "refresh"},
 		{Key: "Esc", Label: "back"},
@@ -103,29 +108,15 @@ func (v *ListView) HandleFilter(expression string) {
 	v.mu.Lock()
 	v.filter = expression
 	v.mu.Unlock()
-	v.renderTable()
+	v.rebuildRows()
 }
 
-// renderTable rebuilds the table display.
-func (v *ListView) renderTable() {
+// rebuildRows converts groups into table rows with filter and sort.
+func (v *ListView) rebuildRows() {
 	v.mu.RLock()
-	groups := v.groups
 	filter := v.filter
-	v.mu.RUnlock()
-
-	v.table.Clear()
-
-	headers := []string{"SG ID", "NAME", "VPC ID", "INBOUND RULES", "OUTBOUND RULES", "DESCRIPTION"}
-	for col, h := range headers {
-		cell := tview.NewTableCell(h).
-			SetTextColor(tcell.ColorDodgerBlue).
-			SetSelectable(false).
-			SetExpansion(1)
-		v.table.SetCell(0, col, cell)
-	}
-
-	row := 1
-	for _, sg := range groups {
+	groups := make([]ec2.SecurityGroup, 0, len(v.groups))
+	for _, sg := range v.groups {
 		if filter != "" {
 			lower := strings.ToLower(filter)
 			if !strings.Contains(strings.ToLower(sg.GroupName), lower) &&
@@ -134,37 +125,84 @@ func (v *ListView) renderTable() {
 				continue
 			}
 		}
+		groups = append(groups, sg)
+	}
+	v.mu.RUnlock()
 
+	rows := make([]components.Row, len(groups))
+	for i, sg := range groups {
 		desc := sg.Description
 		if len(desc) > 40 {
 			desc = desc[:40] + "..."
 		}
-
-		v.table.SetCell(row, 0, tview.NewTableCell(sg.GroupID).SetTextColor(tcell.ColorWhite).SetExpansion(1))
-		v.table.SetCell(row, 1, tview.NewTableCell(sg.GroupName).SetTextColor(tcell.ColorLightGray).SetExpansion(1))
-		v.table.SetCell(row, 2, tview.NewTableCell(sg.VPCID).SetTextColor(tcell.ColorLightGray).SetExpansion(1))
-		v.table.SetCell(row, 3, tview.NewTableCell(fmt.Sprintf("%d", len(sg.IngressRules))).SetTextColor(tcell.ColorYellow).SetExpansion(1))
-		v.table.SetCell(row, 4, tview.NewTableCell(fmt.Sprintf("%d", len(sg.EgressRules))).SetTextColor(tcell.ColorLightGray).SetExpansion(1))
-		v.table.SetCell(row, 5, tview.NewTableCell(desc).SetTextColor(tcell.ColorGray).SetExpansion(1))
-		row++
+		rows[i] = components.Row{
+			ID: sg.GroupID,
+			Cells: []string{
+				sg.GroupID,
+				sg.GroupName,
+				sg.VPCID,
+				fmt.Sprintf("%d", len(sg.IngressRules)),
+				fmt.Sprintf("%d", len(sg.EgressRules)),
+				desc,
+			},
+			Colors: []tcell.Color{
+				tcell.ColorWhite,
+				tcell.ColorLightGray,
+				tcell.ColorLightGray,
+				tcell.ColorYellow,
+				tcell.ColorLightGray,
+				tcell.ColorGray,
+			},
+		}
 	}
 
-	v.table.SetTitle(fmt.Sprintf(" Security Groups (%d) ", row-1))
+	col := v.st.SortColumn()
+	v.st.SetRows(rows)
+	v.st.SortRows(func(row components.Row) string {
+		return sgSortKey(row, col)
+	})
 }
 
-// handleInput processes key events.
+func sgSortKey(row components.Row, col string) string {
+	idx := -1
+	for i, c := range sgColumns {
+		if c.Field == col {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 || idx >= len(row.Cells) {
+		return ""
+	}
+	// Zero-pad numeric fields for proper string sorting
+	switch col {
+	case "inbound", "outbound":
+		return fmt.Sprintf("%05s", row.Cells[idx])
+	}
+	return strings.ToLower(row.Cells[idx])
+}
+
+// handleInput processes view-specific key events.
 func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 	switch event.Rune() {
 	case 'v':
-		row, _ := v.table.GetSelection()
-		if row <= 0 {
+		id := v.st.GetRowID()
+		if id == "" {
 			return event
 		}
-		sg := v.getSGAtRow(row)
-		if sg != nil && sg.VPCID != "" {
+		v.mu.RLock()
+		var vpcID string
+		for _, sg := range v.groups {
+			if sg.GroupID == id {
+				vpcID = sg.VPCID
+				break
+			}
+		}
+		v.mu.RUnlock()
+		if vpcID != "" {
 			v.navigator.Navigate(navigation.Route{
 				Resource:   "vpc",
-				ResourceID: sg.VPCID,
+				ResourceID: vpcID,
 			})
 		}
 		return nil
@@ -184,27 +222,12 @@ func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 }
 
 // onSelect handles Enter on a security group.
-func (v *ListView) onSelect(row, _ int) {
-	if row <= 0 {
-		return
-	}
-	sg := v.getSGAtRow(row)
-	if sg == nil {
+func (v *ListView) onSelect(_ int, id string) {
+	if id == "" {
 		return
 	}
 	v.navigator.Navigate(navigation.Route{
 		Resource:   "sg-detail",
-		ResourceID: sg.GroupID,
+		ResourceID: id,
 	})
-}
-
-func (v *ListView) getSGAtRow(row int) *ec2.SecurityGroup {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-
-	idx := row - 1
-	if idx < 0 || idx >= len(v.groups) {
-		return nil
-	}
-	return &v.groups[idx]
 }

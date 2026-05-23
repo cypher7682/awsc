@@ -20,45 +20,46 @@ type Navigator interface {
 	EC2Service() *ec2.Service
 	TviewApp() *tview.Application
 	Context() context.Context
-	ShowConfirm(prompt string)
+	ShowConfirm(prompt string, onConfirm func())
 	SetStatus(text string)
+}
+
+// ec2Columns defines the column layout for the EC2 table.
+var ec2Columns = []components.Column{
+	{Title: "NAME", Field: "name", Expansion: 2},
+	{Title: "INSTANCE ID", Field: "instance_id", Expansion: 1},
+	{Title: "STATE", Field: "state", Expansion: 1},
+	{Title: "TYPE", Field: "type", Expansion: 1},
+	{Title: "PRIVATE IP", Field: "private_ip", Expansion: 1},
+	{Title: "PUBLIC IP", Field: "public_ip", Expansion: 1},
+	{Title: "AZ", Field: "az", Expansion: 1},
+	{Title: "KEY", Field: "key", Expansion: 1},
 }
 
 // ListView displays a list of EC2 instances.
 type ListView struct {
-	table     *tview.Table
+	st        *components.SortableTable
 	navigator Navigator
 
 	mu        sync.RWMutex
 	instances []ec2.Instance
 	filtered  []ec2.Instance
 	filter    string
-	sortField string
-	sortAsc   bool
 }
 
 // NewListView creates a new EC2 list view.
 func NewListView(navigator Navigator) *ListView {
-	table := tview.NewTable()
-	table.SetBorders(false)
-	table.SetSelectable(true, false)
-	table.SetTitle(" EC2 Instances ")
-	table.SetBorder(true)
-	table.SetBorderColor(tcell.ColorDodgerBlue)
-	table.SetSelectedStyle(tcell.StyleDefault.
-		Background(tcell.ColorDodgerBlue).
-		Foreground(tcell.ColorWhite))
-
 	v := &ListView{
-		table:     table,
 		navigator: navigator,
-		sortField: "name",
-		sortAsc:   true,
 	}
 
-	// Set up input handling
-	table.SetInputCapture(v.handleInput)
-	table.SetSelectedFunc(v.onSelect)
+	v.st = components.NewSortableTable(components.SortableTableConfig{
+		Title:    "EC2 Instances",
+		Columns:  ec2Columns,
+		OnStatus: navigator.SetStatus,
+	})
+	v.st.SetExtraInput(v.handleInput)
+	v.st.SetSelectedFunc(v.onSelect)
 
 	return v
 }
@@ -70,7 +71,7 @@ func (v *ListView) Name() string {
 
 // Render returns the tview primitive.
 func (v *ListView) Render() tview.Primitive {
-	return v.table
+	return v.st.Table
 }
 
 // Refresh reloads instance data from AWS.
@@ -86,7 +87,7 @@ func (v *ListView) Refresh(ctx context.Context) error {
 	v.applyFilter()
 	v.mu.Unlock()
 
-	v.renderTable()
+	v.rebuildRows()
 	return nil
 }
 
@@ -94,10 +95,12 @@ func (v *ListView) Refresh(ctx context.Context) error {
 func (v *ListView) Shortcuts() []components.Shortcut {
 	return []components.Shortcut{
 		{Key: "Enter", Label: "details"},
-		{Key: "t", Label: "terminate"},
+		{Key: "Del", Label: "terminate"},
 		{Key: "r", Label: "reboot"},
-		{Key: "s", Label: "stop"},
-		{Key: "S", Label: "start"},
+		{Key: "x", Label: "stop"},
+		{Key: "a", Label: "start"},
+		{Key: "s", Label: "sort-by"},
+		{Key: "d", Label: "sort-dir"},
 		{Key: "/", Label: "filter"},
 		{Key: "R", Label: "refresh"},
 		{Key: "Esc", Label: "back"},
@@ -119,7 +122,7 @@ func (v *ListView) HandleFilter(expression string) {
 	v.filter = expression
 	v.applyFilter()
 	v.mu.Unlock()
-	v.renderTable()
+	v.rebuildRows()
 }
 
 // applyFilter filters instances based on the current filter expression.
@@ -142,7 +145,6 @@ func (v *ListView) applyFilter() {
 
 // matchesFilter checks if an instance matches the filter expression.
 func (v *ListView) matchesFilter(inst ec2.Instance, filter string) bool {
-	// Parse filter: "field operator value" or just "value" for text search
 	parts := strings.SplitN(filter, " ", 3)
 
 	// Simple text search if no operator
@@ -183,7 +185,6 @@ func (v *ListView) matchesFilter(inst ec2.Instance, filter string) bool {
 	case "key_name", "key":
 		fieldValue = strings.ToLower(inst.KeyName)
 	default:
-		// Check tags
 		if strings.HasPrefix(field, "tag:") {
 			tagKey := strings.TrimPrefix(field, "tag:")
 			fieldValue = strings.ToLower(inst.Tags[tagKey])
@@ -208,134 +209,202 @@ func (v *ListView) matchesFilter(inst ec2.Instance, filter string) bool {
 	}
 }
 
-// renderTable rebuilds the table display.
-func (v *ListView) renderTable() {
+// rebuildRows converts filtered instances into table rows and applies sort.
+func (v *ListView) rebuildRows() {
 	v.mu.RLock()
-	instances := v.filtered
+	filtered := make([]ec2.Instance, len(v.filtered))
+	copy(filtered, v.filtered)
+	total := len(v.instances)
+	filter := v.filter
 	v.mu.RUnlock()
 
-	v.table.Clear()
-
-	// Header row
-	headers := []string{"NAME", "INSTANCE ID", "STATE", "TYPE", "PRIVATE IP", "PUBLIC IP", "AZ", "KEY"}
-	for col, h := range headers {
-		cell := tview.NewTableCell(h).
-			SetTextColor(tcell.ColorDodgerBlue).
-			SetSelectable(false).
-			SetExpansion(1)
-		if col == 0 {
-			cell.SetExpansion(2) // Name gets more space
-		}
-		v.table.SetCell(0, col, cell)
-	}
-
-	// Data rows
-	for row, inst := range instances {
-		stateColor := stateColor(inst.State)
+	rows := make([]components.Row, len(filtered))
+	for i, inst := range filtered {
 		name := inst.Name
 		if name == "" {
 			name = "[gray]-"
 		}
-
-		cells := []struct {
-			text  string
-			color tcell.Color
-		}{
-			{name, tcell.ColorWhite},
-			{inst.InstanceID, tcell.ColorLightGray},
-			{inst.State, stateColor},
-			{inst.Type, tcell.ColorLightGray},
-			{inst.PrivateIP, tcell.ColorWhite},
-			{orDash(inst.PublicIP), tcell.ColorLightGray},
-			{inst.AZ, tcell.ColorLightGray},
-			{orDash(inst.KeyName), tcell.ColorLightGray},
-		}
-
-		for col, c := range cells {
-			cell := tview.NewTableCell(c.text).
-				SetTextColor(c.color).
-				SetExpansion(1)
-			if col == 0 {
-				cell.SetExpansion(2)
-			}
-			v.table.SetCell(row+1, col, cell)
+		rows[i] = components.Row{
+			ID: inst.InstanceID,
+			Cells: []string{
+				name,
+				inst.InstanceID,
+				inst.State,
+				inst.Type,
+				inst.PrivateIP,
+				orDash(inst.PublicIP),
+				inst.AZ,
+				orDash(inst.KeyName),
+			},
+			Colors: []tcell.Color{
+				tcell.ColorWhite,
+				tcell.ColorLightGray,
+				stateColor(inst.State),
+				tcell.ColorLightGray,
+				tcell.ColorWhite,
+				tcell.ColorLightGray,
+				tcell.ColorLightGray,
+				tcell.ColorLightGray,
+			},
 		}
 	}
 
-	// Update title with count
-	if v.filter != "" {
-		v.table.SetTitle(fmt.Sprintf(" EC2 Instances (%d/%d) [yellow][filter: %s] ", len(instances), len(v.instances), v.filter))
-	} else {
-		v.table.SetTitle(fmt.Sprintf(" EC2 Instances (%d) ", len(instances)))
+	// Sort using the table's current sort state
+	col := v.st.SortColumn()
+	v.st.SetRows(rows)
+	v.st.SortRows(func(row components.Row) string {
+		return ec2SortKey(row, col)
+	})
+
+	// Update title with filter info
+	if filter != "" {
+		v.st.SetTitle(fmt.Sprintf("EC2 Instances (%d/%d) [yellow][filter: %s]", len(rows), total, filter))
 	}
 }
 
-// handleInput processes key events for the EC2 list.
-func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
-	row, _ := v.table.GetSelection()
-	if row <= 0 {
-		return event
+// ec2SortKey extracts a sort key from a Row for a given column field.
+func ec2SortKey(row components.Row, col string) string {
+	idx := -1
+	for i, c := range ec2Columns {
+		if c.Field == col {
+			idx = i
+			break
+		}
 	}
+	if idx < 0 || idx >= len(row.Cells) {
+		return ""
+	}
+	return strings.ToLower(row.Cells[idx])
+}
 
-	inst := v.getInstanceAtRow(row)
-	if inst == nil {
-		return event
+// handleInput processes view-specific key events (beyond sort).
+func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
+	// Delete key = terminate
+	if event.Key() == tcell.KeyDelete {
+		idx := v.st.GetSelectedIndex()
+		if idx < 0 {
+			return event
+		}
+		v.mu.RLock()
+		if idx >= len(v.filtered) {
+			v.mu.RUnlock()
+			return event
+		}
+		inst := v.filtered[idx]
+		v.mu.RUnlock()
+
+		name := inst.Name
+		if name == "" {
+			name = inst.InstanceID
+		}
+		instanceID := inst.InstanceID
+		v.navigator.ShowConfirm(fmt.Sprintf("Terminate %s?", name), func() {
+			v.navigator.SetStatus(fmt.Sprintf("[yellow]Terminating %s...", instanceID))
+			go func() {
+				err := v.navigator.EC2Service().TerminateInstance(v.navigator.Context(), instanceID)
+				v.navigator.TviewApp().QueueUpdateDraw(func() {
+					if err != nil {
+						v.navigator.SetStatus(fmt.Sprintf("[red]Failed to terminate: %s", err.Error()))
+					} else {
+						v.navigator.SetStatus(fmt.Sprintf("[green]Terminated %s", instanceID))
+						v.Refresh(v.navigator.Context())
+					}
+				})
+			}()
+		})
+		return nil
 	}
 
 	switch event.Rune() {
-	case 't':
-		v.navigator.SetStatus(fmt.Sprintf("[yellow]Terminating %s (%s)...", inst.Name, inst.InstanceID))
-		go func() {
-			err := v.navigator.EC2Service().TerminateInstance(v.navigator.Context(), inst.InstanceID)
-			v.navigator.TviewApp().QueueUpdateDraw(func() {
-				if err != nil {
-					v.navigator.SetStatus(fmt.Sprintf("[red]Failed to terminate: %s", err.Error()))
-				} else {
-					v.navigator.SetStatus(fmt.Sprintf("[green]Terminated %s", inst.InstanceID))
-					v.Refresh(v.navigator.Context())
-				}
-			})
-		}()
-		return nil
-
 	case 'r':
-		v.navigator.SetStatus(fmt.Sprintf("[yellow]Rebooting %s (%s)...", inst.Name, inst.InstanceID))
-		go func() {
-			err := v.navigator.EC2Service().RebootInstance(v.navigator.Context(), inst.InstanceID)
-			v.navigator.TviewApp().QueueUpdateDraw(func() {
-				if err != nil {
-					v.navigator.SetStatus(fmt.Sprintf("[red]Failed to reboot: %s", err.Error()))
-				} else {
-					v.navigator.SetStatus(fmt.Sprintf("[green]Rebooting %s", inst.InstanceID))
-				}
-			})
-		}()
+		idx := v.st.GetSelectedIndex()
+		if idx < 0 {
+			return event
+		}
+		v.mu.RLock()
+		if idx >= len(v.filtered) {
+			v.mu.RUnlock()
+			return event
+		}
+		inst := v.filtered[idx]
+		v.mu.RUnlock()
+
+		name := inst.Name
+		if name == "" {
+			name = inst.InstanceID
+		}
+		instanceID := inst.InstanceID
+		v.navigator.ShowConfirm(fmt.Sprintf("Reboot %s?", name), func() {
+			v.navigator.SetStatus(fmt.Sprintf("[yellow]Rebooting %s...", instanceID))
+			go func() {
+				err := v.navigator.EC2Service().RebootInstance(v.navigator.Context(), instanceID)
+				v.navigator.TviewApp().QueueUpdateDraw(func() {
+					if err != nil {
+						v.navigator.SetStatus(fmt.Sprintf("[red]Failed to reboot: %s", err.Error()))
+					} else {
+						v.navigator.SetStatus(fmt.Sprintf("[green]Rebooting %s", instanceID))
+					}
+				})
+			}()
+		})
 		return nil
 
-	case 's':
-		v.navigator.SetStatus(fmt.Sprintf("[yellow]Stopping %s (%s)...", inst.Name, inst.InstanceID))
-		go func() {
-			err := v.navigator.EC2Service().StopInstance(v.navigator.Context(), inst.InstanceID)
-			v.navigator.TviewApp().QueueUpdateDraw(func() {
-				if err != nil {
-					v.navigator.SetStatus(fmt.Sprintf("[red]Failed to stop: %s", err.Error()))
-				} else {
-					v.navigator.SetStatus(fmt.Sprintf("[green]Stopping %s", inst.InstanceID))
-					v.Refresh(v.navigator.Context())
-				}
-			})
-		}()
+	case 'x':
+		idx := v.st.GetSelectedIndex()
+		if idx < 0 {
+			return event
+		}
+		v.mu.RLock()
+		if idx >= len(v.filtered) {
+			v.mu.RUnlock()
+			return event
+		}
+		inst := v.filtered[idx]
+		v.mu.RUnlock()
+
+		name := inst.Name
+		if name == "" {
+			name = inst.InstanceID
+		}
+		instanceID := inst.InstanceID
+		v.navigator.ShowConfirm(fmt.Sprintf("Stop %s?", name), func() {
+			v.navigator.SetStatus(fmt.Sprintf("[yellow]Stopping %s...", instanceID))
+			go func() {
+				err := v.navigator.EC2Service().StopInstance(v.navigator.Context(), instanceID)
+				v.navigator.TviewApp().QueueUpdateDraw(func() {
+					if err != nil {
+						v.navigator.SetStatus(fmt.Sprintf("[red]Failed to stop: %s", err.Error()))
+					} else {
+						v.navigator.SetStatus(fmt.Sprintf("[green]Stopping %s", instanceID))
+						v.Refresh(v.navigator.Context())
+					}
+				})
+			}()
+		})
 		return nil
 
-	case 'S':
-		v.navigator.SetStatus(fmt.Sprintf("[yellow]Starting %s (%s)...", inst.Name, inst.InstanceID))
+	case 'a':
+		idx := v.st.GetSelectedIndex()
+		if idx < 0 {
+			return event
+		}
+		v.mu.RLock()
+		if idx >= len(v.filtered) {
+			v.mu.RUnlock()
+			return event
+		}
+		inst := v.filtered[idx]
+		v.mu.RUnlock()
+
+		instanceID := inst.InstanceID
+		v.navigator.SetStatus(fmt.Sprintf("[yellow]Starting %s...", instanceID))
 		go func() {
-			err := v.navigator.EC2Service().StartInstance(v.navigator.Context(), inst.InstanceID)
+			err := v.navigator.EC2Service().StartInstance(v.navigator.Context(), instanceID)
 			v.navigator.TviewApp().QueueUpdateDraw(func() {
 				if err != nil {
 					v.navigator.SetStatus(fmt.Sprintf("[red]Failed to start: %s", err.Error()))
 				} else {
-					v.navigator.SetStatus(fmt.Sprintf("[green]Starting %s", inst.InstanceID))
+					v.navigator.SetStatus(fmt.Sprintf("[green]Starting %s", instanceID))
 					v.Refresh(v.navigator.Context())
 				}
 			})
@@ -359,33 +428,20 @@ func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 }
 
 // onSelect handles Enter key on an instance row.
-func (v *ListView) onSelect(row, _ int) {
-	if row <= 0 {
+func (v *ListView) onSelect(idx int, id string) {
+	v.mu.RLock()
+	if idx >= len(v.filtered) {
+		v.mu.RUnlock()
 		return
 	}
-
-	inst := v.getInstanceAtRow(row)
-	if inst == nil {
-		return
-	}
+	inst := v.filtered[idx]
+	v.mu.RUnlock()
 
 	v.navigator.Navigate(navigation.Route{
 		Resource:   "ec2-detail",
-		ResourceID: inst.InstanceID,
+		ResourceID: id,
 		Params:     map[string]string{"name": inst.Name},
 	})
-}
-
-// getInstanceAtRow returns the instance at the given table row (1-indexed).
-func (v *ListView) getInstanceAtRow(row int) *ec2.Instance {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-
-	idx := row - 1 // account for header row
-	if idx < 0 || idx >= len(v.filtered) {
-		return nil
-	}
-	return &v.filtered[idx]
 }
 
 func stateColor(state string) tcell.Color {

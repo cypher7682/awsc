@@ -38,11 +38,12 @@ type View interface {
 
 // App is the main TUI application.
 type App struct {
-	tviewApp *tview.Application
-	pages    *tview.Pages
-	header   *components.Header
-	omnibox  *components.Omnibox
-	layout   *tview.Flex
+	tviewApp   *tview.Application
+	pages      *tview.Pages
+	header     *components.Header
+	omnibox    *components.Omnibox
+	completion *components.CompletionList
+	layout     *tview.Flex
 
 	// Core state
 	config   *config.AppConfig
@@ -57,6 +58,9 @@ type App struct {
 	// Views
 	views       map[string]View
 	currentView View
+
+	// Confirmation callback
+	confirmCallback func()
 
 	// Context
 	ctx    context.Context
@@ -76,17 +80,18 @@ func NewApp(cfg *config.AppConfig) (*App, error) {
 	tviewApp := tview.NewApplication()
 
 	app := &App{
-		tviewApp: tviewApp,
-		pages:    tview.NewPages(),
-		header:   components.NewHeader(),
-		omnibox:  components.NewOmnibox(),
-		config:   cfg,
-		client:   client,
-		nav:      navigation.NewStack(),
-		commands: navigation.NewCommandRegistry(),
-		views:    make(map[string]View),
-		ctx:      ctx,
-		cancel:   cancel,
+		tviewApp:   tviewApp,
+		pages:      tview.NewPages(),
+		header:     components.NewHeader(),
+		omnibox:    components.NewOmnibox(),
+		completion: components.NewCompletionList(),
+		config:     cfg,
+		client:     client,
+		nav:        navigation.NewStack(),
+		commands:   navigation.NewCommandRegistry(),
+		views:      make(map[string]View),
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 
 	// Initialize services
@@ -99,6 +104,16 @@ func NewApp(cfg *config.AppConfig) (*App, error) {
 
 	// Set up omnibox handler
 	app.omnibox.SetHandler(app)
+	app.omnibox.SetProfiles(config.LoadProfiles())
+	app.omnibox.SetRegions(config.AWSRegions)
+
+	// Wire completion list: when user picks an item, fill omnibox + submit
+	app.completion.SetOnPick(func(text string) {
+		app.omnibox.InputField.SetText(text)
+		app.rebuildLayout()
+		// Auto-submit the selected command
+		app.omnibox.HandleInput()
+	})
 
 	// Build layout
 	app.layout = tview.NewFlex().SetDirection(tview.FlexRow)
@@ -128,6 +143,20 @@ func (a *App) Run() error {
 func (a *App) Stop() {
 	a.cancel()
 	a.tviewApp.Stop()
+}
+
+// rebuildLayout reconstructs the flex layout to show/hide the completion list.
+func (a *App) rebuildLayout() {
+	a.layout.Clear()
+	a.layout.AddItem(a.header, 1, 0, false)
+	if a.completion.Visible() {
+		a.layout.AddItem(a.pages, 0, 1, true)
+		a.layout.AddItem(a.completion.Widget(), a.completion.DesiredHeight(10), 0, false)
+		a.layout.AddItem(a.omnibox, 1, 0, false)
+	} else {
+		a.layout.AddItem(a.pages, 0, 1, true)
+		a.layout.AddItem(a.omnibox, 1, 0, false)
+	}
 }
 
 // RegisterView adds a view to the application.
@@ -173,10 +202,10 @@ func (a *App) Config() *config.AppConfig {
 	return a.config
 }
 
-// ShowConfirm activates the omnibox in confirm mode.
-func (a *App) ShowConfirm(prompt string) {
+// ShowConfirm activates the omnibox in confirm mode with a callback.
+func (a *App) ShowConfirm(prompt string, onConfirm func()) {
+	a.confirmCallback = onConfirm
 	a.omnibox.SetConfirmPrompt(prompt)
-	a.tviewApp.SetFocus(a.omnibox.Input())
 }
 
 // SetStatus updates the omnibox status text.
@@ -305,14 +334,24 @@ func (a *App) OnCommand(command string) {
 func (a *App) OnFilter(filter string) {
 	if a.currentView != nil {
 		a.currentView.HandleFilter(filter)
-		a.omnibox.SetStatus(fmt.Sprintf("[yellow]Filter: %s", filter))
+		if filter == "" {
+			a.omnibox.SetStatus("[green]Filter cleared")
+		} else {
+			a.omnibox.SetStatus(fmt.Sprintf("[yellow]Filter: %s", filter))
+		}
 	}
 }
 
 // OnConfirm handles confirmation input from the omnibox.
 func (a *App) OnConfirm(confirmed bool) {
-	// Views will handle this via their own state
-	_ = confirmed
+	if confirmed && a.confirmCallback != nil {
+		cb := a.confirmCallback
+		a.confirmCallback = nil
+		cb()
+	} else {
+		a.confirmCallback = nil
+		a.omnibox.SetStatus("[gray]Cancelled")
+	}
 }
 
 // globalInputHandler handles application-wide key events.
@@ -329,17 +368,48 @@ func (a *App) globalInputHandler(event *tcell.EventKey) *tcell.EventKey {
 	if a.omnibox.Mode() != components.OmniboxModeIdle {
 		switch event.Key() {
 		case tcell.KeyEscape:
+			a.completion.Hide()
 			a.omnibox.Deactivate()
+			a.rebuildLayout()
 			return nil
+
 		case tcell.KeyEnter:
+			// If completion popup is visible, accept the selection
+			if a.completion.Visible() {
+				a.completion.Accept()
+				return nil
+			}
+			// Otherwise submit the command/filter
 			a.omnibox.HandleInput()
 			return nil
+
+		case tcell.KeyUp:
+			if a.completion.Visible() {
+				a.completion.MoveUp()
+				return nil
+			}
+
+		case tcell.KeyDown:
+			if a.completion.Visible() {
+				a.completion.MoveDown()
+				return nil
+			}
+
+		case tcell.KeyTab, tcell.KeyBacktab:
+			// Tab also accepts completion if visible
+			if a.completion.Visible() {
+				a.completion.Accept()
+				return nil
+			}
+
 		default:
-			// Directly invoke the InputField's input handler.
+			// Deliver keystroke to the InputField, then update completions
 			handler := a.omnibox.Input().InputHandler()
 			if handler != nil {
 				handler(event, func(p tview.Primitive) {})
 			}
+			// After text changes, update the completion list
+			a.updateCompletions()
 			return nil
 		}
 	}
@@ -364,6 +434,32 @@ func (a *App) globalInputHandler(event *tcell.EventKey) *tcell.EventKey {
 	}
 
 	return event
+}
+
+// updateCompletions refreshes the completion popup based on current omnibox text.
+func (a *App) updateCompletions() {
+	// Only show completions in command mode for profile=/region= prefixes
+	if a.omnibox.Mode() != components.OmniboxModeCommand {
+		if a.completion.Visible() {
+			a.completion.Hide()
+			a.rebuildLayout()
+		}
+		return
+	}
+
+	text := a.omnibox.InputField.GetText()
+	items := a.omnibox.GetCompletions(text)
+
+	if len(items) == 0 {
+		if a.completion.Visible() {
+			a.completion.Hide()
+			a.rebuildLayout()
+		}
+		return
+	}
+
+	a.completion.Show(items)
+	a.rebuildLayout()
 }
 
 // showRegionPicker displays a region selection modal.

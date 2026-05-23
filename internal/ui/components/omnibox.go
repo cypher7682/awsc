@@ -43,6 +43,8 @@ type Omnibox struct {
 	suggestions []FilterSuggestion
 	allFields   []string
 	statusText  string
+	profiles    []string // available AWS profiles
+	regions     []string // available AWS regions
 }
 
 // NewOmnibox creates a new omnibox component.
@@ -66,6 +68,16 @@ func NewOmnibox() *Omnibox {
 
 	o.SetStatus("Ready")
 	return o
+}
+
+// SetProfiles sets the available AWS profiles for command autocomplete.
+func (o *Omnibox) SetProfiles(profiles []string) {
+	o.profiles = profiles
+}
+
+// SetRegions sets the available AWS regions for command autocomplete.
+func (o *Omnibox) SetRegions(regions []string) {
+	o.regions = regions
 }
 
 // SetHandler sets the event handler for omnibox actions.
@@ -95,20 +107,18 @@ func (o *Omnibox) Activate(mode OmniboxMode) {
 	o.mode = mode
 	o.InputField.SetText("")
 	o.InputField.SetFieldWidth(0) // 0 = fill available space
+	o.InputField.SetAutocompleteFunc(nil) // we use our own popup
 
 	switch mode {
 	case OmniboxModeCommand:
 		o.InputField.SetLabel("[dodgerblue::b]: [-::-]")
 		o.InputField.SetPlaceholder("ec2, ecr, services, region=us-east-1, quit")
-		o.InputField.SetAutocompleteFunc(o.commandAutocomplete)
 	case OmniboxModeFilter:
 		o.InputField.SetLabel("[dodgerblue::b]/ [-::-]")
 		o.InputField.SetPlaceholder("name contains web, state = running, ...")
-		o.InputField.SetAutocompleteFunc(o.filterAutocomplete)
 	case OmniboxModeConfirm:
 		o.InputField.SetLabel("[red::b]Confirm (y/N): [-::-]")
 		o.InputField.SetPlaceholder("")
-		o.InputField.SetAutocompleteFunc(nil)
 	}
 }
 
@@ -116,7 +126,6 @@ func (o *Omnibox) Activate(mode OmniboxMode) {
 func (o *Omnibox) Deactivate() {
 	o.mode = OmniboxModeIdle
 	o.InputField.SetText("")
-	o.InputField.SetAutocompleteFunc(nil)
 	o.InputField.SetPlaceholder("")
 	// Restore status display
 	o.InputField.SetLabel(fmt.Sprintf(" [gray]%s", o.statusText))
@@ -137,6 +146,10 @@ func (o *Omnibox) Input() *tview.InputField {
 func (o *Omnibox) HandleInput() {
 	text := strings.TrimSpace(o.InputField.GetText())
 	if text == "" {
+		// Empty submit in filter mode clears the filter
+		if o.mode == OmniboxModeFilter && o.handler != nil {
+			o.handler.OnFilter("")
+		}
 		o.Deactivate()
 		return
 	}
@@ -166,24 +179,99 @@ func (o *Omnibox) SetConfirmPrompt(prompt string) {
 	o.InputField.SetLabel(fmt.Sprintf("[red::b]%s (y/N): [-::-]", prompt))
 }
 
+// GetCompletions returns the popup completion items for the current text.
+// Returns non-nil only for profile= and region= prefixes (where a popup makes sense).
+func (o *Omnibox) GetCompletions(currentText string) []string {
+	if currentText == "" {
+		return nil
+	}
+
+	lower := strings.ToLower(currentText)
+
+	// Profile completions
+	if strings.HasPrefix(lower, "profile=") {
+		prefix := strings.TrimPrefix(lower, "profile=")
+		var matches []string
+		for _, p := range o.profiles {
+			if prefix == "" || strings.Contains(strings.ToLower(p), prefix) {
+				matches = append(matches, "profile="+p)
+			}
+		}
+		sort.Strings(matches)
+		return matches
+	}
+
+	// Region completions
+	if strings.HasPrefix(lower, "region=") {
+		prefix := strings.TrimPrefix(lower, "region=")
+		var matches []string
+		for _, r := range o.regions {
+			if prefix == "" || strings.Contains(r, prefix) {
+				matches = append(matches, "region="+r)
+			}
+		}
+		sort.Strings(matches)
+		return matches
+	}
+
+	return nil
+}
+
 // commandAutocomplete provides autocomplete for commands.
 func (o *Omnibox) commandAutocomplete(currentText string) []string {
 	if currentText == "" {
 		return nil
 	}
 
+	lower := strings.ToLower(currentText)
+
+	// If user is typing "profile=...", suggest profiles
+	if strings.HasPrefix(lower, "profile=") {
+		prefix := strings.TrimPrefix(lower, "profile=")
+		var matches []string
+		for _, p := range o.profiles {
+			if prefix == "" || strings.HasPrefix(strings.ToLower(p), prefix) {
+				matches = append(matches, "profile="+p)
+			}
+		}
+		sort.Strings(matches)
+		return matches
+	}
+
+	// If user is typing "region=...", suggest regions
+	if strings.HasPrefix(lower, "region=") {
+		prefix := strings.TrimPrefix(lower, "region=")
+		var matches []string
+		for _, r := range o.regions {
+			if prefix == "" || strings.HasPrefix(r, prefix) {
+				matches = append(matches, "region="+r)
+			}
+		}
+		sort.Strings(matches)
+		return matches
+	}
+
+	// Base command suggestions
 	commands := []string{
 		"ec2", "ecr", "services", "sg", "vpc", "subnet",
 		"region", "profile", "quit", "help",
 	}
 
 	var matches []string
-	lower := strings.ToLower(currentText)
 	for _, cmd := range commands {
 		if strings.HasPrefix(cmd, lower) {
 			matches = append(matches, cmd)
 		}
 	}
+
+	// Also suggest "profile=" and "region=" if partially matched
+	if strings.HasPrefix("profile=", lower) && lower != "profile=" {
+		matches = append(matches, "profile=")
+	}
+	if strings.HasPrefix("region=", lower) && lower != "region=" {
+		matches = append(matches, "region=")
+	}
+
 	sort.Strings(matches)
 	return matches
 }

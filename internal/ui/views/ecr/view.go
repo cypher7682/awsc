@@ -20,13 +20,23 @@ type Navigator interface {
 	ECRService() *ecr.Service
 	TviewApp() *tview.Application
 	Context() context.Context
-	ShowConfirm(prompt string)
+	ShowConfirm(prompt string, onConfirm func())
 	SetStatus(text string)
+}
+
+// --- ECR Repository List View ---
+
+var ecrColumns = []components.Column{
+	{Title: "NAME", Field: "name", Expansion: 2},
+	{Title: "URI", Field: "uri", Expansion: 2},
+	{Title: "MUTABILITY", Field: "mutability", Expansion: 1},
+	{Title: "SCAN ON PUSH", Field: "scan_on_push", Expansion: 1},
+	{Title: "CREATED", Field: "created", Expansion: 1},
 }
 
 // ListView displays a list of ECR repositories.
 type ListView struct {
-	table     *tview.Table
+	st        *components.SortableTable
 	navigator Navigator
 
 	mu     sync.RWMutex
@@ -36,23 +46,17 @@ type ListView struct {
 
 // NewListView creates a new ECR list view.
 func NewListView(navigator Navigator) *ListView {
-	table := tview.NewTable()
-	table.SetBorders(false)
-	table.SetSelectable(true, false)
-	table.SetTitle(" ECR Repositories ")
-	table.SetBorder(true)
-	table.SetBorderColor(tcell.ColorDodgerBlue)
-	table.SetSelectedStyle(tcell.StyleDefault.
-		Background(tcell.ColorDodgerBlue).
-		Foreground(tcell.ColorWhite))
-
 	v := &ListView{
-		table:     table,
 		navigator: navigator,
 	}
 
-	table.SetInputCapture(v.handleInput)
-	table.SetSelectedFunc(v.onSelect)
+	v.st = components.NewSortableTable(components.SortableTableConfig{
+		Title:    "ECR Repositories",
+		Columns:  ecrColumns,
+		OnStatus: navigator.SetStatus,
+	})
+	v.st.SetExtraInput(v.handleInput)
+	v.st.SetSelectedFunc(v.onSelect)
 
 	return v
 }
@@ -64,7 +68,7 @@ func (v *ListView) Name() string {
 
 // Render returns the tview primitive.
 func (v *ListView) Render() tview.Primitive {
-	return v.table
+	return v.st.Table
 }
 
 // Refresh reloads repository data from AWS.
@@ -79,7 +83,7 @@ func (v *ListView) Refresh(ctx context.Context) error {
 	v.repos = repos
 	v.mu.Unlock()
 
-	v.renderTable()
+	v.rebuildRows()
 	return nil
 }
 
@@ -88,7 +92,9 @@ func (v *ListView) Shortcuts() []components.Shortcut {
 	return []components.Shortcut{
 		{Key: "Enter", Label: "images"},
 		{Key: "c", Label: "create"},
-		{Key: "d", Label: "delete"},
+		{Key: "Del", Label: "delete"},
+		{Key: "s", Label: "sort-by"},
+		{Key: "d", Label: "sort-dir"},
 		{Key: "/", Label: "filter"},
 		{Key: "R", Label: "refresh"},
 		{Key: "Esc", Label: "back"},
@@ -105,86 +111,110 @@ func (v *ListView) HandleFilter(expression string) {
 	v.mu.Lock()
 	v.filter = expression
 	v.mu.Unlock()
-	v.renderTable()
+	v.rebuildRows()
 }
 
-// renderTable rebuilds the table display.
-func (v *ListView) renderTable() {
+// rebuildRows converts repos into table rows, applies filter and sort.
+func (v *ListView) rebuildRows() {
 	v.mu.RLock()
-	repos := v.repos
 	filter := v.filter
-	v.mu.RUnlock()
-
-	v.table.Clear()
-
-	// Header row
-	headers := []string{"NAME", "URI", "MUTABILITY", "SCAN ON PUSH", "CREATED"}
-	for col, h := range headers {
-		cell := tview.NewTableCell(h).
-			SetTextColor(tcell.ColorDodgerBlue).
-			SetSelectable(false).
-			SetExpansion(1)
-		if col == 0 || col == 1 {
-			cell.SetExpansion(2)
-		}
-		v.table.SetCell(0, col, cell)
-	}
-
-	// Data rows
-	row := 1
-	for _, repo := range repos {
-		// Apply filter
+	repos := make([]ecr.Repository, 0, len(v.repos))
+	for _, repo := range v.repos {
 		if filter != "" && !strings.Contains(strings.ToLower(repo.Name), strings.ToLower(filter)) {
 			continue
 		}
+		repos = append(repos, repo)
+	}
+	v.mu.RUnlock()
 
+	rows := make([]components.Row, len(repos))
+	for i, repo := range repos {
 		scanIcon := "[red]No"
 		if repo.ScanOnPush {
 			scanIcon = "[green]Yes"
 		}
-
-		mutColor := "yellow"
+		mutText := repo.MutabilityTag
+		mutColor := tcell.ColorYellow
 		if repo.MutabilityTag == "IMMUTABLE" {
-			mutColor = "green"
+			mutColor = tcell.ColorGreen
 		}
 
-		v.table.SetCell(row, 0, tview.NewTableCell(repo.Name).SetTextColor(tcell.ColorWhite).SetExpansion(2))
-		v.table.SetCell(row, 1, tview.NewTableCell(repo.URI).SetTextColor(tcell.ColorLightGray).SetExpansion(2))
-		v.table.SetCell(row, 2, tview.NewTableCell(fmt.Sprintf("[%s]%s", mutColor, repo.MutabilityTag)).SetExpansion(1))
-		v.table.SetCell(row, 3, tview.NewTableCell(scanIcon).SetExpansion(1))
-		v.table.SetCell(row, 4, tview.NewTableCell(repo.CreatedAt.Format("2006-01-02")).SetTextColor(tcell.ColorLightGray).SetExpansion(1))
-		row++
+		rows[i] = components.Row{
+			ID: repo.Name,
+			Cells: []string{
+				repo.Name,
+				repo.URI,
+				mutText,
+				scanIcon,
+				repo.CreatedAt.Format("2006-01-02"),
+			},
+			Colors: []tcell.Color{
+				tcell.ColorWhite,
+				tcell.ColorLightGray,
+				mutColor,
+				tcell.ColorWhite, // tview dynamic colors handle this
+				tcell.ColorLightGray,
+			},
+		}
 	}
 
-	v.table.SetTitle(fmt.Sprintf(" ECR Repositories (%d) ", row-1))
+	col := v.st.SortColumn()
+	v.st.SetRows(rows)
+	v.st.SortRows(func(row components.Row) string {
+		return ecrSortKey(row, col)
+	})
 }
 
-// handleInput processes key events for the ECR list.
-func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
-	switch event.Rune() {
-	case 'd':
-		row, _ := v.table.GetSelection()
-		if row <= 0 {
-			return event
+func ecrSortKey(row components.Row, col string) string {
+	idx := -1
+	for i, c := range ecrColumns {
+		if c.Field == col {
+			idx = i
+			break
 		}
-		repo := v.getRepoAtRow(row)
-		if repo == nil {
-			return event
-		}
-		v.navigator.SetStatus(fmt.Sprintf("[yellow]Deleting repository %s...", repo.Name))
-		go func() {
-			err := v.navigator.ECRService().DeleteRepository(v.navigator.Context(), repo.Name, false)
-			v.navigator.TviewApp().QueueUpdateDraw(func() {
-				if err != nil {
-					v.navigator.SetStatus(fmt.Sprintf("[red]Failed to delete: %s", err.Error()))
-				} else {
-					v.navigator.SetStatus(fmt.Sprintf("[green]Deleted %s", repo.Name))
-					v.Refresh(v.navigator.Context())
-				}
-			})
-		}()
-		return nil
+	}
+	if idx < 0 || idx >= len(row.Cells) {
+		return ""
+	}
+	return strings.ToLower(row.Cells[idx])
+}
 
+// handleInput processes view-specific keys.
+func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
+	if event.Key() == tcell.KeyDelete {
+		idx := v.st.GetSelectedIndex()
+		if idx < 0 {
+			return event
+		}
+		v.mu.RLock()
+		if idx >= len(v.repos) {
+			v.mu.RUnlock()
+			return event
+		}
+		// Find the actual repo — we need to account for filtering
+		repoName := v.st.GetRowID()
+		v.mu.RUnlock()
+		if repoName == "" {
+			return event
+		}
+		v.navigator.ShowConfirm(fmt.Sprintf("Delete repository %s?", repoName), func() {
+			v.navigator.SetStatus(fmt.Sprintf("[yellow]Deleting repository %s...", repoName))
+			go func() {
+				err := v.navigator.ECRService().DeleteRepository(v.navigator.Context(), repoName, false)
+				v.navigator.TviewApp().QueueUpdateDraw(func() {
+					if err != nil {
+						v.navigator.SetStatus(fmt.Sprintf("[red]Failed to delete: %s", err.Error()))
+					} else {
+						v.navigator.SetStatus(fmt.Sprintf("[green]Deleted %s", repoName))
+						v.Refresh(v.navigator.Context())
+					}
+				})
+			}()
+		})
+		return nil
+	}
+
+	switch event.Rune() {
 	case 'R':
 		go func() {
 			v.navigator.TviewApp().QueueUpdateDraw(func() {
@@ -201,36 +231,29 @@ func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 	return event
 }
 
-// onSelect handles Enter key on a repository row.
-func (v *ListView) onSelect(row, _ int) {
-	if row <= 0 {
-		return
-	}
-	repo := v.getRepoAtRow(row)
-	if repo == nil {
+func (v *ListView) onSelect(_ int, id string) {
+	if id == "" {
 		return
 	}
 	v.navigator.Navigate(navigation.Route{
 		Resource:   "ecr-detail",
-		ResourceID: repo.Name,
+		ResourceID: id,
 	})
 }
 
-// getRepoAtRow returns the repository at the given table row.
-func (v *ListView) getRepoAtRow(row int) *ecr.Repository {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
+// --- ECR Image View ---
 
-	idx := row - 1
-	if idx < 0 || idx >= len(v.repos) {
-		return nil
-	}
-	return &v.repos[idx]
+var ecrImageColumns = []components.Column{
+	{Title: "TAGS", Field: "tags", Expansion: 2},
+	{Title: "DIGEST", Field: "digest", Expansion: 1},
+	{Title: "SIZE (MB)", Field: "size", Expansion: 1},
+	{Title: "PUSHED", Field: "pushed", Expansion: 1},
+	{Title: "SCAN STATUS", Field: "scan_status", Expansion: 1},
 }
 
 // ImageView displays images within an ECR repository.
 type ImageView struct {
-	table     *tview.Table
+	st        *components.SortableTable
 	navigator Navigator
 	repoName  string
 
@@ -240,23 +263,18 @@ type ImageView struct {
 
 // NewImageView creates a new ECR image list view.
 func NewImageView(navigator Navigator, repoName string) *ImageView {
-	table := tview.NewTable()
-	table.SetBorders(false)
-	table.SetSelectable(true, false)
-	table.SetTitle(fmt.Sprintf(" ECR Images: %s ", repoName))
-	table.SetBorder(true)
-	table.SetBorderColor(tcell.ColorDodgerBlue)
-	table.SetSelectedStyle(tcell.StyleDefault.
-		Background(tcell.ColorDodgerBlue).
-		Foreground(tcell.ColorWhite))
-
 	v := &ImageView{
-		table:     table,
 		navigator: navigator,
 		repoName:  repoName,
 	}
 
-	table.SetInputCapture(v.handleInput)
+	v.st = components.NewSortableTable(components.SortableTableConfig{
+		Title:    fmt.Sprintf("ECR Images: %s", repoName),
+		Columns:  ecrImageColumns,
+		OnStatus: navigator.SetStatus,
+	})
+	v.st.SetExtraInput(v.handleInput)
+
 	return v
 }
 
@@ -267,7 +285,7 @@ func (v *ImageView) Name() string {
 
 // Render returns the tview primitive.
 func (v *ImageView) Render() tview.Primitive {
-	return v.table
+	return v.st.Table
 }
 
 // Refresh reloads image data from AWS.
@@ -282,14 +300,16 @@ func (v *ImageView) Refresh(ctx context.Context) error {
 	v.images = images
 	v.mu.Unlock()
 
-	v.renderTable()
+	v.rebuildRows()
 	return nil
 }
 
 // Shortcuts returns image view shortcuts.
 func (v *ImageView) Shortcuts() []components.Shortcut {
 	return []components.Shortcut{
-		{Key: "d", Label: "delete"},
+		{Key: "Del", Label: "delete"},
+		{Key: "s", Label: "sort-by"},
+		{Key: "d", Label: "sort-dir"},
 		{Key: "R", Label: "refresh"},
 		{Key: "Esc", Label: "back"},
 	}
@@ -303,66 +323,80 @@ func (v *ImageView) FilterFields() []string {
 // HandleFilter applies a filter.
 func (v *ImageView) HandleFilter(_ string) {}
 
-// renderTable rebuilds the image table.
-func (v *ImageView) renderTable() {
+// rebuildRows converts images into table rows and applies sort.
+func (v *ImageView) rebuildRows() {
 	v.mu.RLock()
-	images := v.images
+	images := make([]ecr.Image, len(v.images))
+	copy(images, v.images)
 	v.mu.RUnlock()
 
-	v.table.Clear()
-
-	headers := []string{"TAGS", "DIGEST", "SIZE (MB)", "PUSHED", "SCAN STATUS"}
-	for col, h := range headers {
-		cell := tview.NewTableCell(h).
-			SetTextColor(tcell.ColorDodgerBlue).
-			SetSelectable(false).
-			SetExpansion(1)
-		if col == 0 {
-			cell.SetExpansion(2)
-		}
-		v.table.SetCell(0, col, cell)
-	}
-
-	for row, img := range images {
+	rows := make([]components.Row, len(images))
+	for i, img := range images {
 		tags := strings.Join(img.Tags, ", ")
 		if tags == "" {
 			tags = "[gray]<untagged>"
 		}
 		sizeMB := fmt.Sprintf("%.1f", float64(img.SizeBytes)/1024/1024)
-
 		digest := img.Digest
 		if len(digest) > 19 {
 			digest = digest[:19] + "..."
 		}
-
-		scanColor := "gray"
 		scanStatus := orDash(img.ScanStatus)
+		scanColor := tcell.ColorGray
 		if img.ScanStatus == "COMPLETE" {
-			scanColor = "green"
+			scanColor = tcell.ColorGreen
 		} else if img.ScanStatus == "FAILED" {
-			scanColor = "red"
+			scanColor = tcell.ColorRed
 		}
 
-		v.table.SetCell(row+1, 0, tview.NewTableCell(tags).SetTextColor(tcell.ColorWhite).SetExpansion(2))
-		v.table.SetCell(row+1, 1, tview.NewTableCell(digest).SetTextColor(tcell.ColorLightGray).SetExpansion(1))
-		v.table.SetCell(row+1, 2, tview.NewTableCell(sizeMB).SetTextColor(tcell.ColorLightGray).SetExpansion(1))
-		v.table.SetCell(row+1, 3, tview.NewTableCell(img.PushedAt.Format("2006-01-02 15:04")).SetTextColor(tcell.ColorLightGray).SetExpansion(1))
-		v.table.SetCell(row+1, 4, tview.NewTableCell(fmt.Sprintf("[%s]%s", scanColor, scanStatus)).SetExpansion(1))
+		rows[i] = components.Row{
+			ID: img.Digest, // full digest as ID
+			Cells: []string{
+				tags,
+				digest,
+				sizeMB,
+				img.PushedAt.Format("2006-01-02 15:04"),
+				scanStatus,
+			},
+			Colors: []tcell.Color{
+				tcell.ColorWhite,
+				tcell.ColorLightGray,
+				tcell.ColorLightGray,
+				tcell.ColorLightGray,
+				scanColor,
+			},
+		}
 	}
 
-	v.table.SetTitle(fmt.Sprintf(" ECR Images: %s (%d) ", v.repoName, len(images)))
+	col := v.st.SortColumn()
+	v.st.SetRows(rows)
+	v.st.SortRows(func(row components.Row) string {
+		return ecrImageSortKey(row, col)
+	})
 }
 
-// handleInput processes key events for the image view.
+func ecrImageSortKey(row components.Row, col string) string {
+	idx := -1
+	for i, c := range ecrImageColumns {
+		if c.Field == col {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 || idx >= len(row.Cells) {
+		return ""
+	}
+	return strings.ToLower(row.Cells[idx])
+}
+
+// handleInput processes view-specific keys for image view.
 func (v *ImageView) handleInput(event *tcell.EventKey) *tcell.EventKey {
-	switch event.Rune() {
-	case 'd':
-		row, _ := v.table.GetSelection()
-		if row <= 0 {
+	if event.Key() == tcell.KeyDelete {
+		idx := v.st.GetSelectedIndex()
+		if idx < 0 {
 			return event
 		}
 		v.mu.RLock()
-		idx := row - 1
 		if idx >= len(v.images) {
 			v.mu.RUnlock()
 			return event
@@ -370,20 +404,34 @@ func (v *ImageView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 		img := v.images[idx]
 		v.mu.RUnlock()
 
-		v.navigator.SetStatus(fmt.Sprintf("[yellow]Deleting image %s...", img.Digest[:19]))
-		go func() {
-			err := v.navigator.ECRService().DeleteImage(v.navigator.Context(), v.repoName, img.Digest)
-			v.navigator.TviewApp().QueueUpdateDraw(func() {
-				if err != nil {
-					v.navigator.SetStatus(fmt.Sprintf("[red]Failed to delete: %s", err.Error()))
-				} else {
-					v.navigator.SetStatus("[green]Image deleted")
-					v.Refresh(v.navigator.Context())
-				}
-			})
-		}()
+		digestShort := img.Digest
+		if len(digestShort) > 19 {
+			digestShort = digestShort[:19]
+		}
+		tagLabel := digestShort
+		if len(img.Tags) > 0 {
+			tagLabel = img.Tags[0]
+		}
+		digest := img.Digest
+		repoName := v.repoName
+		v.navigator.ShowConfirm(fmt.Sprintf("Delete image %s?", tagLabel), func() {
+			v.navigator.SetStatus(fmt.Sprintf("[yellow]Deleting image %s...", digestShort))
+			go func() {
+				err := v.navigator.ECRService().DeleteImage(v.navigator.Context(), repoName, digest)
+				v.navigator.TviewApp().QueueUpdateDraw(func() {
+					if err != nil {
+						v.navigator.SetStatus(fmt.Sprintf("[red]Failed to delete: %s", err.Error()))
+					} else {
+						v.navigator.SetStatus("[green]Image deleted")
+						v.Refresh(v.navigator.Context())
+					}
+				})
+			}()
+		})
 		return nil
+	}
 
+	switch event.Rune() {
 	case 'R':
 		go func() {
 			v.Refresh(v.navigator.Context())
