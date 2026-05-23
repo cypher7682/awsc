@@ -21,6 +21,7 @@ type Chart struct {
 	*tview.TextView
 	title      string
 	unit       string
+	window     string // time window label, e.g. "3h", "30min"
 	data       []ChartDatapoint
 	color      tcell.Color
 	height     int // chart area height in terminal rows (0 = auto from allocated space)
@@ -29,18 +30,19 @@ type Chart struct {
 }
 
 // NewChart creates a new chart widget.
-func NewChart(title, unit string, color tcell.Color) *Chart {
+func NewChart(title, unit, window string, color tcell.Color) *Chart {
 	tv := tview.NewTextView()
 	tv.SetDynamicColors(true)
 	tv.SetBorder(true)
 	tv.SetBorderColor(tcell.ColorGray)
-	tv.SetTitle(fmt.Sprintf(" %s ", title))
+	tv.SetTitle(fmt.Sprintf(" %s (%s) ", title, window))
 	tv.SetTitleColor(tcell.ColorWhite)
 
 	return &Chart{
 		TextView: tv,
 		title:    title,
 		unit:     unit,
+		window:   window,
 		color:    color,
 		height:   0, // auto: fill available space
 	}
@@ -79,7 +81,7 @@ func (c *Chart) SetData(data []ChartDatapoint) {
 // SetError displays an error message on the chart.
 func (c *Chart) SetError(msg string) {
 	c.SetText(fmt.Sprintf("\n  [red]%s", msg))
-	c.SetTitle(fmt.Sprintf(" %s [red](error)[-] ", c.title))
+	c.SetTitle(fmt.Sprintf(" %s (%s) [red](error)[-] ", c.title, c.window))
 }
 
 // render draws the chart using braille characters.
@@ -105,8 +107,8 @@ func (c *Chart) render() {
 	if chartWidth <= 0 {
 		chartWidth = len(c.data) // fallback
 	}
-	// Subtract Y-axis label width ("  12.3K ") = 8 chars
-	plotWidth := chartWidth - 8
+	// Subtract Y-axis label width (7 chars + 1 space = 8) plus 2 char safety margin
+	plotWidth := chartWidth - 10
 	if plotWidth < 4 {
 		plotWidth = 4
 	}
@@ -228,7 +230,7 @@ func (c *Chart) render() {
 		formatValue(minVal+padding, c.unit)))
 
 	c.SetText(b.String())
-	c.SetTitle(fmt.Sprintf(" %s (%s) ", c.title, formatValue(latest.Value, c.unit)))
+	c.SetTitle(fmt.Sprintf(" %s (%s) %s ", c.title, c.window, formatValue(latest.Value, c.unit)))
 }
 
 // brailleChar encodes a 2x4 dot region into a Unicode braille character.

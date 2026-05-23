@@ -511,14 +511,14 @@ func TestSortableTable_OnSelectionChanged(t *testing.T) {
 }
 
 func TestChart_Creation(t *testing.T) {
-	chart := NewChart("CPUUtilization", "Percent", 0)
+	chart := NewChart("CPUUtilization", "Percent", "3h", 0)
 	if chart == nil {
 		t.Fatal("expected non-nil chart")
 	}
 }
 
 func TestChart_SetData(t *testing.T) {
-	chart := NewChart("Test", "Percent", 0)
+	chart := NewChart("Test", "Percent", "3h", 0)
 	chart.SetHeight(4)
 
 	// No data
@@ -536,7 +536,7 @@ func TestChart_SetData(t *testing.T) {
 }
 
 func TestChart_ConstantData(t *testing.T) {
-	chart := NewChart("Flat", "Count", 0)
+	chart := NewChart("Flat", "Count", "3h", 0)
 	chart.SetHeight(4)
 
 	// All same values (edge case: valRange == 0)
