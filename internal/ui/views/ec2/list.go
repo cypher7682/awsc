@@ -119,7 +119,7 @@ func (v *ListView) Refresh(ctx context.Context) error {
 func (v *ListView) Shortcuts() []components.Shortcut {
 	sc := []components.Shortcut{
 		{Key: "Enter", Label: "details"},
-		{Key: "c", Label: "shell"},
+		{Key: "c", Label: "connect"},
 		{Key: "S", Label: "multi-select"},
 		{Key: "Del", Label: "terminate"},
 		{Key: "r", Label: "reboot"},

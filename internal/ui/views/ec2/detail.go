@@ -250,7 +250,7 @@ func (v *DetailView) fetchMetrics() {
 func (v *DetailView) Shortcuts() []components.Shortcut {
 	return []components.Shortcut{
 		{Key: "\u2190/\u2192", Label: "tabs"},
-		{Key: "c", Label: "shell"},
+		{Key: "c", Label: "connect"},
 		{Key: "Del", Label: "terminate/del tag"},
 		{Key: "r", Label: "reboot"},
 		{Key: "x", Label: "stop"},
