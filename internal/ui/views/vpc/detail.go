@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -22,12 +23,22 @@ type DetailView struct {
 
 	// Page widgets
 	overviewTable *tview.Table
-	subnetsTable  *tview.Table
+	subnetsST     *components.SortableTable
 	routePanel    *tview.TextView
 	tagsTable     *tview.Table
 
 	// Navigation targets for selectable rows (indexed by "tab:row")
 	navTargets map[string]navigation.Route
+}
+
+// vpcSubnetColumns defines columns for the subnets table within VPC detail.
+var vpcSubnetColumns = []components.Column{
+	{Title: "SUBNET ID", Field: "subnet_id", Expansion: 1},
+	{Title: "NAME", Field: "name", Expansion: 1},
+	{Title: "CIDR", Field: "cidr", Expansion: 1},
+	{Title: "AZ", Field: "az", Expansion: 1},
+	{Title: "AVAILABLE IPs", Field: "available_ips", Expansion: 1},
+	{Title: "PUBLIC IP", Field: "public_ip", Expansion: 1},
 }
 
 // NewDetailView creates a new VPC detail view.
@@ -52,21 +63,17 @@ func NewDetailView(navigator Navigator, vpcID string) *DetailView {
 		v.navigateRow("overview", row)
 	})
 
-	// --- Subnets page ---
-	v.subnetsTable = tview.NewTable()
-	v.subnetsTable.SetBorders(false)
-	v.subnetsTable.SetSelectable(true, false)
-	v.subnetsTable.SetBorder(true)
-	v.subnetsTable.SetTitle(" Subnets ")
-	v.subnetsTable.SetBorderColor(tcell.ColorDodgerBlue)
-	v.subnetsTable.SetSelectedStyle(tcell.StyleDefault.
-		Background(tcell.ColorDodgerBlue).
-		Foreground(tcell.ColorWhite))
-	v.subnetsTable.SetSelectedFunc(func(row, _ int) {
-		if row > 0 && row-1 < len(v.subnets) {
+	// --- Subnets page (SortableTable) ---
+	v.subnetsST = components.NewSortableTable(components.SortableTableConfig{
+		Title:    "Subnets",
+		Columns:  vpcSubnetColumns,
+		OnStatus: navigator.SetStatus,
+	})
+	v.subnetsST.SetSelectedFunc(func(_ int, id string) {
+		if id != "" {
 			v.navigator.Navigate(navigation.Route{
 				Resource:   "subnet-detail",
-				ResourceID: v.subnets[row-1].SubnetID,
+				ResourceID: id,
 			})
 		}
 	})
@@ -93,7 +100,7 @@ func NewDetailView(navigator Navigator, vpcID string) *DetailView {
 	// Build tabbed view
 	v.tabs = components.NewTabbedView([]components.TabPage{
 		{Name: "Overview", Content: v.overviewTable},
-		{Name: "Subnets", Content: v.subnetsTable},
+		{Name: "Subnets", Content: v.subnetsST.Table},
 		{Name: "Route Tables", Content: v.routePanel},
 		{Name: "Tags", Content: v.tagsTable},
 	})
@@ -150,6 +157,8 @@ func (v *DetailView) Shortcuts() []components.Shortcut {
 	return []components.Shortcut{
 		{Key: "\u2190/\u2192", Label: "tabs"},
 		{Key: "Enter", Label: "navigate"},
+		{Key: "s", Label: "sort-by"},
+		{Key: "d", Label: "sort-dir"},
 		{Key: "n", Label: "goto subnet"},
 		{Key: "Esc", Label: "back"},
 	}
@@ -258,32 +267,53 @@ func (v *DetailView) renderOverview() {
 }
 
 func (v *DetailView) renderSubnets() {
-	v.subnetsTable.Clear()
-
-	headers := []string{"SUBNET ID", "NAME", "CIDR", "AZ", "AVAILABLE IPS", "PUBLIC IP"}
-	for col, h := range headers {
-		cell := tview.NewTableCell(h).
-			SetTextColor(tcell.ColorDodgerBlue).
-			SetSelectable(false).
-			SetExpansion(1)
-		v.subnetsTable.SetCell(0, col, cell)
-	}
-
-	for row, subnet := range v.subnets {
+	rows := make([]components.Row, len(v.subnets))
+	for i, subnet := range v.subnets {
 		publicIP := "No"
+		publicColor := tcell.ColorLightGray
 		if subnet.MapPublicIP {
 			publicIP = "Yes"
+			publicColor = tcell.ColorGreen
 		}
-		v.subnetsTable.SetCell(row+1, 0, tview.NewTableCell(subnet.SubnetID).SetTextColor(tcell.ColorWhite).SetExpansion(1))
-		v.subnetsTable.SetCell(row+1, 1, tview.NewTableCell(orDash(subnet.Name)).SetTextColor(tcell.ColorLightGray).SetExpansion(1))
-		v.subnetsTable.SetCell(row+1, 2, tview.NewTableCell(subnet.CIDRBlock).SetTextColor(tcell.ColorLightGray).SetExpansion(1))
-		v.subnetsTable.SetCell(row+1, 3, tview.NewTableCell(subnet.AZ).SetTextColor(tcell.ColorLightGray).SetExpansion(1))
-		v.subnetsTable.SetCell(row+1, 4, tview.NewTableCell(fmt.Sprintf("%d", subnet.AvailableIPs)).SetTextColor(tcell.ColorYellow).SetExpansion(1))
-		v.subnetsTable.SetCell(row+1, 5, tview.NewTableCell(publicIP).SetTextColor(tcell.ColorLightGray).SetExpansion(1))
+
+		rows[i] = components.Row{
+			ID: subnet.SubnetID,
+			Cells: []string{
+				subnet.SubnetID,
+				orDash(subnet.Name),
+				subnet.CIDRBlock,
+				subnet.AZ,
+				fmt.Sprintf("%d", subnet.AvailableIPs),
+				publicIP,
+			},
+			Colors: []tcell.Color{
+				tcell.ColorWhite,
+				tcell.ColorLightGray,
+				tcell.ColorLightGray,
+				tcell.ColorLightGray,
+				tcell.ColorYellow,
+				publicColor,
+			},
+		}
 	}
 
-	v.subnetsTable.SetTitle(fmt.Sprintf(" Subnets (%d) ", len(v.subnets)))
-	v.subnetsTable.SetFixed(1, 0)
+	v.subnetsST.SetRows(rows)
+	v.subnetsST.SetSortKeyFn(func(row components.Row, field string) string {
+		idx := -1
+		for i, c := range vpcSubnetColumns {
+			if c.Field == field {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 || idx >= len(row.Cells) {
+			return ""
+		}
+		if field == "available_ips" {
+			return fmt.Sprintf("%010s", row.Cells[idx])
+		}
+		return strings.ToLower(row.Cells[idx])
+	})
 }
 
 func (v *DetailView) renderTags() {
@@ -324,11 +354,11 @@ func (v *DetailView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 	case 'n':
 		// Navigate to selected subnet from subnets tab
 		if v.tabs.CurrentPage() == 1 {
-			row, _ := v.subnetsTable.GetSelection()
-			if row > 0 && row-1 < len(v.subnets) {
+			id := v.subnetsST.GetRowID()
+			if id != "" {
 				v.navigator.Navigate(navigation.Route{
 					Resource:   "subnet-detail",
-					ResourceID: v.subnets[row-1].SubnetID,
+					ResourceID: id,
 				})
 				return nil
 			}
