@@ -150,10 +150,13 @@ sso_start_url = https://example.awsapps.com/start
 
 func TestResolveEC2ConnectCmd(t *testing.T) {
 	uc := &UserConfig{
-		EC2ConnectCmd: "aws ssm start-session --target #INSTANCEID --profile #PROFILE --region #REGION",
+		EC2ConnectCmd: "aws ssm start-session --target {{ .InstanceID }} --profile {{ .Profile }} --region {{ .Region }}",
 	}
 
-	got := uc.ResolveEC2ConnectCmd("prod", "eu-west-1", "i-abc123")
+	got, err := uc.ResolveEC2ConnectCmd("prod", "eu-west-1", "i-abc123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	expected := "aws ssm start-session --target i-abc123 --profile prod --region eu-west-1"
 	if got != expected {
 		t.Errorf("expected %q, got %q", expected, got)
@@ -162,9 +165,37 @@ func TestResolveEC2ConnectCmd(t *testing.T) {
 
 func TestResolveEC2ConnectCmd_Empty(t *testing.T) {
 	uc := &UserConfig{}
-	got := uc.ResolveEC2ConnectCmd("prod", "eu-west-1", "i-abc123")
+	got, err := uc.ResolveEC2ConnectCmd("prod", "eu-west-1", "i-abc123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got != "" {
 		t.Errorf("expected empty string, got %q", got)
+	}
+}
+
+func TestResolveEC2ConnectCmd_InvalidTemplate(t *testing.T) {
+	uc := &UserConfig{
+		EC2ConnectCmd: "aws ssm --target {{ .BadField",
+	}
+	_, err := uc.ResolveEC2ConnectCmd("prod", "eu-west-1", "i-abc123")
+	if err == nil {
+		t.Error("expected error for invalid template, got nil")
+	}
+}
+
+func TestResolveLoginCmd(t *testing.T) {
+	uc := &UserConfig{
+		LoginCmd: "aws sso login --profile {{ .Profile }} --region {{ .Region }}",
+	}
+
+	got, err := uc.ResolveLoginCmd("staging", "us-west-2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := "aws sso login --profile staging --region us-west-2"
+	if got != expected {
+		t.Errorf("expected %q, got %q", expected, got)
 	}
 }
 

@@ -206,14 +206,8 @@ func (v *DetailView) fetchMetrics() {
 	// 3 hours of data, 5-minute periods = ~36 data points per metric
 	results, err := cwSvc.GetEC2Metrics(ctx, v.instanceID, cloudwatch.DefaultEC2Metrics, 300, 3*time.Hour)
 	if err != nil {
-		// If auth error, attempt auto-login and retry
-		if v.navigator.HandleAuthError(err) {
-			retryCtx, retryCancel := context.WithTimeout(v.navigator.Context(), 30*time.Second)
-			defer retryCancel()
-			// Re-fetch CloudWatch service (session may have been rebuilt)
-			cwSvc = v.navigator.CloudWatchService()
-			results, err = cwSvc.GetEC2Metrics(retryCtx, v.instanceID, cloudwatch.DefaultEC2Metrics, 300, 3*time.Hour)
-		}
+		// If auth error, trigger background auto-login (user can refresh after)
+		v.navigator.HandleAuthError(err)
 		if err != nil {
 			// Show a friendly error on each chart widget
 			errMsg := simplifyCloudWatchError(err)

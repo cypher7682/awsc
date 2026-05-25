@@ -212,41 +212,56 @@ func IsAuthError(err error) bool {
 		strings.Contains(msg, "The SSO session associated with this profile has expired")
 }
 
-// RunLoginCmd suspends the TUI, runs the configured login_cmd, and resumes.
-// Returns true if the command was run (regardless of its exit code).
+// RunLoginCmd runs the configured login_cmd in the background (non-interactive).
+// Shows progress/result in the omnibox. Returns true if the command was launched.
 // Returns false if no login_cmd is configured.
-func (a *App) RunLoginCmd() bool {
+// The optional onComplete callback is called (on the main goroutine) when the
+// login command finishes, with the success status.
+func (a *App) RunLoginCmd(onComplete ...func(success bool)) bool {
 	userCfg := a.config.User
 	if !userCfg.HasLoginCmd() {
 		return false
 	}
 
-	cmdStr := userCfg.ResolveLoginCmd(a.config.Profile, a.config.Region)
-
-	a.tviewApp.Suspend(func() {
-		fmt.Fprintf(os.Stderr, "\n[awsc] Running login command: %s\n\n", cmdStr)
-
-		cmd := exec.Command("sh", "-c", cmdStr)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "\n[awsc] Login command failed: %v\n", err)
-			fmt.Fprintf(os.Stderr, "[awsc] Press Enter to return to awsc...")
-			bufio := make([]byte, 1)
-			os.Stdin.Read(bufio)
-		} else {
-			fmt.Fprintf(os.Stderr, "\n[awsc] Login successful. Resuming...\n")
-			time.Sleep(500 * time.Millisecond)
-		}
-	})
-
-	// Reinitialise AWS clients with (hopefully) fresh credentials
-	if err := a.session.Reload(a.ctx); err != nil {
-		a.omnibox.SetStatus(fmt.Sprintf("[red]Session reload failed: %s", err.Error()))
+	cmdStr, err := userCfg.ResolveLoginCmd(a.config.Profile, a.config.Region)
+	if err != nil {
+		a.omnibox.SetStatus(fmt.Sprintf("[red]login_cmd template error: %s", err.Error()))
+		return false
 	}
-	a.rebuildServices()
+
+	a.omnibox.SetStatus(fmt.Sprintf("[yellow]Running login: %s", cmdStr))
+
+	go func() {
+		cmd := exec.Command("sh", "-c", cmdStr)
+		output, err := cmd.CombinedOutput()
+
+		a.tviewApp.QueueUpdateDraw(func() {
+			if err != nil {
+				msg := strings.TrimSpace(string(output))
+				if msg == "" {
+					msg = err.Error()
+				}
+				a.omnibox.SetStatus(fmt.Sprintf("[red]Login failed: %s", msg))
+				for _, cb := range onComplete {
+					cb(false)
+				}
+			} else {
+				a.omnibox.SetStatus("[green]Login successful")
+				// Reinitialise AWS clients with fresh credentials
+				if reloadErr := a.session.Reload(a.ctx); reloadErr != nil {
+					a.omnibox.SetStatus(fmt.Sprintf("[red]Session reload failed: %s", reloadErr.Error()))
+					for _, cb := range onComplete {
+						cb(false)
+					}
+				} else {
+					a.rebuildServices()
+					for _, cb := range onComplete {
+						cb(true)
+					}
+				}
+			}
+		})
+	}()
 
 	return true
 }
@@ -260,7 +275,11 @@ func (a *App) RunEC2ConnectCmd(instanceID string) bool {
 		return false
 	}
 
-	cmdStr := userCfg.ResolveEC2ConnectCmd(a.config.Profile, a.config.Region, instanceID)
+	cmdStr, err := userCfg.ResolveEC2ConnectCmd(a.config.Profile, a.config.Region, instanceID)
+	if err != nil {
+		a.omnibox.SetStatus(fmt.Sprintf("[red]ec2_connect_cmd template error: %s", err.Error()))
+		return false
+	}
 
 	a.tviewApp.Suspend(func() {
 		fmt.Fprintf(os.Stderr, "\n[awsc] Connecting to %s...\n", instanceID)
@@ -391,37 +410,36 @@ func (a *App) navigate(route navigation.Route) {
 				a.omnibox.SetStatus("[yellow]Credentials expired. Running login command...")
 			})
 
-			// RunLoginCmd must be called from the main goroutine via QueueUpdate
-			// because Suspend requires the event loop. Use a channel to coordinate.
-			done := make(chan bool, 1)
-			a.tviewApp.QueueUpdate(func() {
-				result := a.RunLoginCmd()
-				done <- result
+			// RunLoginCmd is async; use callback to retry after completion
+			a.tviewApp.QueueUpdateDraw(func() {
+				a.RunLoginCmd(func(success bool) {
+					if success {
+						// Retry the refresh with fresh credentials
+						go func() {
+							retryCtx, retryCancel := context.WithTimeout(a.ctx, DefaultTimeout)
+							defer retryCancel()
+							retryErr := view.Refresh(retryCtx)
+							a.tviewApp.QueueUpdateDraw(func() {
+								if retryErr != nil {
+									a.showNavigateError(route, retryErr)
+								} else {
+									a.pages.RemovePage("current")
+									a.pages.AddAndSwitchToPage("current", view.Render(), true)
+									a.omnibox.SetStatus(fmt.Sprintf("[green]%s loaded", route.String()))
+								}
+							})
+						}()
+					} else {
+						a.showNavigateError(route, err)
+					}
+				})
 			})
-			loginRan := <-done
-
-			if loginRan {
-				// Retry the refresh with fresh credentials
-				retryCtx, retryCancel := context.WithTimeout(a.ctx, DefaultTimeout)
-				defer retryCancel()
-				err = view.Refresh(retryCtx)
-			}
+			return
 		}
 
 		if err != nil {
 			a.tviewApp.QueueUpdateDraw(func() {
-				errView := tview.NewTextView()
-				errView.SetTextAlign(tview.AlignCenter)
-				errView.SetDynamicColors(true)
-				errMsg := err.Error()
-				hint := "[gray]Press Esc to go back, : to try another command"
-				if IsAuthError(err) && !a.config.User.HasLoginCmd() {
-					hint = "[gray]Tip: configure login_cmd in ~/.config/awsc/config.yaml to auto-login"
-				}
-				errView.SetText(fmt.Sprintf("\n\n\n[red]Error loading %s:\n\n[white]%s\n\n%s", route.String(), errMsg, hint))
-				a.pages.RemovePage("current")
-				a.pages.AddAndSwitchToPage("current", errView, true)
-				a.omnibox.SetStatus(fmt.Sprintf("[red]Error: %s", errMsg))
+				a.showNavigateError(route, err)
 			})
 			return
 		}
@@ -431,6 +449,22 @@ func (a *App) navigate(route navigation.Route) {
 			a.omnibox.SetStatus(fmt.Sprintf("[green]%s loaded", route.String()))
 		})
 	}()
+}
+
+// showNavigateError displays an error page when navigation/refresh fails.
+func (a *App) showNavigateError(route navigation.Route, err error) {
+	errView := tview.NewTextView()
+	errView.SetTextAlign(tview.AlignCenter)
+	errView.SetDynamicColors(true)
+	errMsg := err.Error()
+	hint := "[gray]Press Esc to go back, : to try another command"
+	if IsAuthError(err) && !a.config.User.HasLoginCmd() {
+		hint = "[gray]Tip: configure login_cmd in ~/.config/awsc/config.yaml to auto-login"
+	}
+	errView.SetText(fmt.Sprintf("\n\n\n[red]Error loading %s:\n\n[white]%s\n\n%s", route.String(), errMsg, hint))
+	a.pages.RemovePage("current")
+	a.pages.AddAndSwitchToPage("current", errView, true)
+	a.omnibox.SetStatus(fmt.Sprintf("[red]Error: %s", errMsg))
 }
 
 // OnCommand handles command input from the omnibox.

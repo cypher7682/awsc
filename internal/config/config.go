@@ -3,11 +3,13 @@ package config
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"text/template"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -54,14 +56,66 @@ type AppConfig struct {
 // UserConfig represents the user's ~/.config/awsc/config.yaml settings.
 type UserConfig struct {
 	// LoginCmd is a shell command to run when credentials are expired/missing.
-	// Supports placeholders: #PROFILE and #REGION which are substituted at runtime.
-	// Example: "aws sso login --profile #PROFILE"
+	// Uses Go text/template syntax. Available fields: {{ .Profile }}, {{ .Region }}
+	// Example: "aws sso login --profile {{ .Profile }}"
 	LoginCmd string `yaml:"login_cmd"`
 
 	// EC2ConnectCmd is a shell command to connect (shell) to an EC2 instance.
-	// Supports placeholders: #PROFILE, #REGION, #INSTANCEID which are substituted at runtime.
-	// Example: "aws ssm start-session --target #INSTANCEID --profile #PROFILE --region #REGION"
+	// Uses Go text/template syntax. Available fields: {{ .Profile }}, {{ .Region }}, {{ .InstanceID }}
+	// Example: "aws ssm start-session --target {{ .InstanceID }} --profile {{ .Profile }} --region {{ .Region }}"
 	EC2ConnectCmd string `yaml:"ec2_connect_cmd"`
+}
+
+// CmdContext holds template data available to all command templates.
+type CmdContext struct {
+	Profile    string
+	Region     string
+	InstanceID string
+}
+
+// resolveTemplate renders a Go text/template string with the given context.
+// Returns the rendered string, or an error description if the template is invalid.
+func resolveTemplate(tmplStr string, ctx CmdContext) (string, error) {
+	t, err := template.New("cmd").Parse(tmplStr)
+	if err != nil {
+		return "", fmt.Errorf("invalid template: %w", err)
+	}
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, ctx); err != nil {
+		return "", fmt.Errorf("template execution failed: %w", err)
+	}
+	return buf.String(), nil
+}
+
+// ResolveLoginCmd renders the login_cmd template with profile and region.
+func (uc *UserConfig) ResolveLoginCmd(profile, region string) (string, error) {
+	if uc == nil || uc.LoginCmd == "" {
+		return "", nil
+	}
+	return resolveTemplate(uc.LoginCmd, CmdContext{Profile: profile, Region: region})
+}
+
+// HasLoginCmd returns true if a login command is configured.
+func (uc *UserConfig) HasLoginCmd() bool {
+	return uc != nil && uc.LoginCmd != ""
+}
+
+// ResolveEC2ConnectCmd renders the ec2_connect_cmd template with profile, region,
+// and instance ID.
+func (uc *UserConfig) ResolveEC2ConnectCmd(profile, region, instanceID string) (string, error) {
+	if uc == nil || uc.EC2ConnectCmd == "" {
+		return "", nil
+	}
+	return resolveTemplate(uc.EC2ConnectCmd, CmdContext{
+		Profile:    profile,
+		Region:     region,
+		InstanceID: instanceID,
+	})
+}
+
+// HasEC2ConnectCmd returns true if an EC2 connect command is configured.
+func (uc *UserConfig) HasEC2ConnectCmd() bool {
+	return uc != nil && uc.EC2ConnectCmd != ""
 }
 
 // DefaultConfigPath returns the path to ~/.config/awsc/config.yaml.
@@ -91,40 +145,6 @@ func LoadUserConfig() *UserConfig {
 		return &UserConfig{}
 	}
 	return &uc
-}
-
-// ResolveLoginCmd substitutes #PROFILE and #REGION placeholders in the login command.
-func (uc *UserConfig) ResolveLoginCmd(profile, region string) string {
-	if uc == nil || uc.LoginCmd == "" {
-		return ""
-	}
-	cmd := uc.LoginCmd
-	cmd = strings.ReplaceAll(cmd, "#PROFILE", profile)
-	cmd = strings.ReplaceAll(cmd, "#REGION", region)
-	return cmd
-}
-
-// HasLoginCmd returns true if a login command is configured.
-func (uc *UserConfig) HasLoginCmd() bool {
-	return uc != nil && uc.LoginCmd != ""
-}
-
-// ResolveEC2ConnectCmd substitutes #PROFILE, #REGION, and #INSTANCEID placeholders
-// in the ec2_connect_cmd.
-func (uc *UserConfig) ResolveEC2ConnectCmd(profile, region, instanceID string) string {
-	if uc == nil || uc.EC2ConnectCmd == "" {
-		return ""
-	}
-	cmd := uc.EC2ConnectCmd
-	cmd = strings.ReplaceAll(cmd, "#PROFILE", profile)
-	cmd = strings.ReplaceAll(cmd, "#REGION", region)
-	cmd = strings.ReplaceAll(cmd, "#INSTANCEID", instanceID)
-	return cmd
-}
-
-// HasEC2ConnectCmd returns true if an EC2 connect command is configured.
-func (uc *UserConfig) HasEC2ConnectCmd() bool {
-	return uc != nil && uc.EC2ConnectCmd != ""
 }
 
 // NewAppConfig creates a new AppConfig with defaults from environment or flags.
