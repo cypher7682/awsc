@@ -39,6 +39,7 @@ func NewView(navigator Navigator) *View {
 		services: []ServiceEntry{
 			{Name: "EC2", Command: "ec2", Description: "Elastic Compute Cloud - Virtual Servers", Status: "supported"},
 			{Name: "ECR", Command: "ecr", Description: "Elastic Container Registry - Docker Images", Status: "supported"},
+			{Name: "EKS", Command: "eks", Description: "Elastic Kubernetes Service - Managed Kubernetes", Status: "supported"},
 			{Name: "VPC", Command: "vpc", Description: "Virtual Private Cloud - Networking", Status: "supported"},
 			{Name: "Security Groups", Command: "sg", Description: "Security Groups - Firewall Rules", Status: "supported"},
 			{Name: "Subnets", Command: "subnet", Description: "Subnets - Network Segments", Status: "supported"},

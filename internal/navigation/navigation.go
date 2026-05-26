@@ -139,6 +139,9 @@ func (cr *CommandRegistry) registerDefaults() {
 	cr.commands["ecr"] = func(_ string) Route {
 		return Route{Resource: "ecr"}
 	}
+	cr.commands["eks"] = func(_ string) Route {
+		return Route{Resource: "eks"}
+	}
 	cr.commands["sg"] = func(_ string) Route {
 		return Route{Resource: "sg"}
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	awsec2 "github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
+	"github.com/aws/aws-sdk-go-v2/service/eks"
 )
 
 // Session is the unified AWS session. All service layers use this to get
@@ -25,6 +26,7 @@ type Session struct {
 	// Cached SDK clients — rebuilt on profile/region change
 	ec2Client *awsec2.Client
 	ecrClient *ecr.Client
+	eksClient *eks.Client
 	cwClient  *cloudwatch.Client
 }
 
@@ -86,6 +88,13 @@ func (s *Session) CloudWatchClient() *cloudwatch.Client {
 	return s.cwClient
 }
 
+// EKSClient returns the shared EKS SDK client.
+func (s *Session) EKSClient() *eks.Client {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.eksClient
+}
+
 // SetRegion updates the region and rebuilds all clients.
 func (s *Session) SetRegion(ctx context.Context, region string) error {
 	cfg, err := loadConfig(ctx, s.profile, region)
@@ -135,6 +144,7 @@ func (s *Session) Reload(ctx context.Context) error {
 func (s *Session) rebuildClients() {
 	s.ec2Client = awsec2.NewFromConfig(s.cfg)
 	s.ecrClient = ecr.NewFromConfig(s.cfg)
+	s.eksClient = eks.NewFromConfig(s.cfg)
 	s.cwClient = cloudwatch.NewFromConfig(s.cfg)
 }
 

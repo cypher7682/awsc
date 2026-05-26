@@ -11,6 +11,7 @@ import (
 	"github.com/tpriestnall/awsc/internal/ui"
 	ec2view "github.com/tpriestnall/awsc/internal/ui/views/ec2"
 	ecrview "github.com/tpriestnall/awsc/internal/ui/views/ecr"
+	eksview "github.com/tpriestnall/awsc/internal/ui/views/eks"
 	servicesview "github.com/tpriestnall/awsc/internal/ui/views/services"
 	sgview "github.com/tpriestnall/awsc/internal/ui/views/sg"
 	subnetview "github.com/tpriestnall/awsc/internal/ui/views/subnet"
@@ -45,6 +46,7 @@ func main() {
 	app.RegisterView(servicesview.NewView(app))
 	app.RegisterView(ec2view.NewListView(app))
 	app.RegisterView(ecrview.NewListView(app))
+	app.RegisterView(eksview.NewListView(app))
 	app.RegisterView(sgview.NewListView(app))
 	app.RegisterView(vpcview.NewListView(app))
 	app.RegisterView(subnetview.NewListView(app, ""))
@@ -58,6 +60,12 @@ func main() {
 	})
 	app.RegisterViewFactory("subnet-detail", func(route navigation.Route) ui.View {
 		return subnetview.NewDetailView(app, route.ResourceID)
+	})
+	app.RegisterViewFactory("ecr-detail", func(route navigation.Route) ui.View {
+		return ecrview.NewImageView(app, route.ResourceID)
+	})
+	app.RegisterViewFactory("eks-detail", func(route navigation.Route) ui.View {
+		return eksview.NewDetailView(app, route.ResourceID)
 	})
 
 	if err := app.Run(); err != nil {

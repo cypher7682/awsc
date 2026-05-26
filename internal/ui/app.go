@@ -15,6 +15,7 @@ import (
 	"github.com/tpriestnall/awsc/internal/aws/cloudwatch"
 	"github.com/tpriestnall/awsc/internal/aws/ec2"
 	"github.com/tpriestnall/awsc/internal/aws/ecr"
+	"github.com/tpriestnall/awsc/internal/aws/eks"
 	"github.com/tpriestnall/awsc/internal/config"
 	"github.com/tpriestnall/awsc/internal/navigation"
 	"github.com/tpriestnall/awsc/internal/ui/components"
@@ -61,6 +62,7 @@ type App struct {
 	// Services
 	ec2Service  *ec2.Service
 	ecrService  *ecr.Service
+	eksService  *eks.Service
 	cwService   *cloudwatch.Service
 
 	// Views
@@ -188,6 +190,11 @@ func (a *App) ECRService() *ecr.Service {
 	return a.ecrService
 }
 
+// EKSService returns the EKS service instance.
+func (a *App) EKSService() *eks.Service {
+	return a.eksService
+}
+
 // CloudWatchService returns the CloudWatch service instance.
 func (a *App) CloudWatchService() *cloudwatch.Service {
 	return a.cwService
@@ -302,6 +309,65 @@ func (a *App) RunEC2ConnectCmd(instanceID string) bool {
 	return true
 }
 
+// RunECRLoginCmd runs the ecr_login_cmd (or default) in the background.
+// Returns true if the command was started.
+func (a *App) RunECRLoginCmd(registryURI string) bool {
+	cmdStr, err := a.config.User.ResolveECRLoginCmd(a.config.Profile, a.config.Region, registryURI)
+	if err != nil {
+		a.omnibox.SetStatus(fmt.Sprintf("[red]ecr_login_cmd template error: %s", err.Error()))
+		return false
+	}
+
+	a.omnibox.SetStatus(fmt.Sprintf("[yellow]Logging into ECR %s...", registryURI))
+
+	go func() {
+		cmd := exec.Command("sh", "-c", cmdStr)
+		output, err := cmd.CombinedOutput()
+
+		a.tviewApp.QueueUpdateDraw(func() {
+			if err != nil {
+				a.omnibox.SetStatus(fmt.Sprintf("[red]ECR login failed: %v", err))
+			} else {
+				// Check if output contains "Login Succeeded"
+				if strings.Contains(string(output), "Login Succeeded") {
+					a.omnibox.SetStatus("[green]ECR login succeeded")
+				} else {
+					a.omnibox.SetStatus("[green]ECR login completed")
+				}
+			}
+		})
+	}()
+
+	return true
+}
+
+// RunECRFetchCmd runs the ecr_fetch_cmd (or default) in the background.
+// Returns true if the command was started.
+func (a *App) RunECRFetchCmd(registryURI, repoName, imageURI, imageTag string) bool {
+	cmdStr, err := a.config.User.ResolveECRFetchCmd(a.config.Profile, a.config.Region, registryURI, repoName, imageURI, imageTag)
+	if err != nil {
+		a.omnibox.SetStatus(fmt.Sprintf("[red]ecr_fetch_cmd template error: %s", err.Error()))
+		return false
+	}
+
+	a.omnibox.SetStatus(fmt.Sprintf("[yellow]Fetching %s...", imageURI))
+
+	go func() {
+		cmd := exec.Command("sh", "-c", cmdStr)
+		err := cmd.Run()
+
+		a.tviewApp.QueueUpdateDraw(func() {
+			if err != nil {
+				a.omnibox.SetStatus(fmt.Sprintf("[red]Fetch failed: %v", err))
+			} else {
+				a.omnibox.SetStatus(fmt.Sprintf("[green]Fetched %s", imageURI))
+			}
+		})
+	}()
+
+	return true
+}
+
 // HandleAuthError checks if an error is an auth failure. If a login_cmd is
 // configured, it offers to run it. Returns true if login was attempted (caller
 // should retry the operation).
@@ -321,6 +387,7 @@ func (a *App) HandleAuthError(err error) bool {
 func (a *App) rebuildServices() {
 	a.ec2Service = ec2.NewServiceFromClient(a.session.EC2Client())
 	a.ecrService = ecr.NewServiceFromClient(a.session.ECRClient())
+	a.eksService = eks.NewServiceFromClient(a.session.EKSClient())
 	a.cwService = cloudwatch.NewServiceFromClient(a.session.CloudWatchClient())
 }
 
@@ -491,7 +558,13 @@ func (a *App) OnCommand(command string) {
 
 	// Handle region= commands
 	if strings.HasPrefix(command, "region=") {
-		region := strings.TrimPrefix(command, "region=")
+		regionInput := strings.TrimPrefix(command, "region=")
+		// Fuzzy resolve the region
+		region := components.FuzzyBest(regionInput, config.AWSRegions)
+		if region == "" {
+			a.omnibox.SetStatus(fmt.Sprintf("[red]No region matching '%s'", regionInput))
+			return
+		}
 		err := a.config.SetRegion(region)
 		if err != nil {
 			a.omnibox.SetStatus(fmt.Sprintf("[red]%s", err.Error()))
