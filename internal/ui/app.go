@@ -363,6 +363,13 @@ func (a *App) SetStatus(text string) {
 	a.omnibox.SetStatus(text)
 }
 
+// RefreshShortcuts re-reads Shortcuts() from the current view and updates the header.
+func (a *App) RefreshShortcuts() {
+	if a.currentView != nil {
+		a.header.SetShortcuts(a.currentView.Shortcuts())
+	}
+}
+
 // navigate renders the view for the given route.
 func (a *App) navigate(route navigation.Route) {
 	viewName := route.Resource

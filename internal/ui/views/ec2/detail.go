@@ -149,6 +149,9 @@ func NewDetailView(navigator Navigator, instanceID string) *DetailView {
 		{Name: "Tags", Content: v.tagsTable},
 	})
 	v.tabs.SetExtraInput(v.handleInput)
+	v.tabs.SetOnTabChanged(func(_ int, _ string) {
+		v.navigator.RefreshShortcuts()
+	})
 
 	return v
 }
@@ -240,20 +243,43 @@ func (v *DetailView) fetchMetrics() {
 	})
 }
 
-// Shortcuts returns detail view shortcuts.
+// Shortcuts returns context-specific shortcuts based on the active tab.
 func (v *DetailView) Shortcuts() []components.Shortcut {
-	return []components.Shortcut{
+	common := []components.Shortcut{
 		{Key: "\u2190/\u2192", Label: "tabs"},
 		{Key: "c", Label: "connect"},
-		{Key: "Del", Label: "terminate/del tag"},
+	}
+	nav := []components.Shortcut{
+		{Key: "v", Label: "goto VPC"},
+		{Key: "n", Label: "goto subnet"},
+	}
+	instanceActions := []components.Shortcut{
+		{Key: "Del", Label: "terminate"},
 		{Key: "r", Label: "reboot"},
 		{Key: "x", Label: "stop"},
 		{Key: "a", Label: "start"},
-		{Key: "e", Label: "edit tag"},
-		{Key: "+", Label: "add tag"},
-		{Key: "v", Label: "goto VPC"},
-		{Key: "n", Label: "goto subnet"},
+	}
+	back := []components.Shortcut{
 		{Key: "Esc", Label: "back"},
+	}
+
+	switch v.tabs.CurrentPage() {
+	case 4: // Tags
+		return append(common, append([]components.Shortcut{
+			{Key: "e", Label: "edit tag"},
+			{Key: "+", Label: "add tag"},
+			{Key: "Del", Label: "delete tag"},
+		}, back...)...)
+	case 0: // Overview
+		return append(common, append(instanceActions, append(nav, back...)...)...)
+	case 1: // Networking
+		return append(common, append(instanceActions, append(nav, back...)...)...)
+	case 2: // Security Groups
+		return append(common, append(instanceActions, back...)...)
+	case 3: // Monitoring
+		return append(common, append(instanceActions, back...)...)
+	default:
+		return append(common, append(instanceActions, back...)...)
 	}
 }
 

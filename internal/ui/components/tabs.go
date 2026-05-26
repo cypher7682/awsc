@@ -26,6 +26,9 @@ type TabbedView struct {
 
 	// extraInput handles view-specific keys beyond tab navigation.
 	extraInput func(event *tcell.EventKey) *tcell.EventKey
+
+	// onTabChanged is called whenever the active tab changes.
+	onTabChanged func(index int, name string)
 }
 
 // NewTabbedView creates a new tabbed view with the given pages.
@@ -71,6 +74,11 @@ func (tv *TabbedView) SetExtraInput(fn func(event *tcell.EventKey) *tcell.EventK
 	tv.extraInput = fn
 }
 
+// SetOnTabChanged registers a callback fired when the active tab changes.
+func (tv *TabbedView) SetOnTabChanged(fn func(index int, name string)) {
+	tv.onTabChanged = fn
+}
+
 // CurrentPage returns the index of the active page.
 func (tv *TabbedView) CurrentPage() int {
 	return tv.current
@@ -92,6 +100,9 @@ func (tv *TabbedView) SwitchTo(idx int) {
 	tv.current = idx
 	tv.content.SwitchToPage(tv.pages[idx].Name)
 	tv.renderTabBar()
+	if tv.onTabChanged != nil {
+		tv.onTabChanged(idx, tv.pages[idx].Name)
+	}
 }
 
 // Next moves to the next page (wraps around).

@@ -28,6 +28,7 @@ type Navigator interface {
 	SetStatus(text string)
 	HandleAuthError(err error) bool
 	RunEC2ConnectCmd(instanceID string) bool
+	RefreshShortcuts()
 }
 
 // ec2Columns defines the column layout for the EC2 table.
