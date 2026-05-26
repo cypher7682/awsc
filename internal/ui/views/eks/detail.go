@@ -37,6 +37,11 @@ type DetailView struct {
 	accessTable     *tview.Table
 	tagsTable       *components.SortableTable
 
+	// Compute tab state
+	computeFocusIndex   int    // 0=nodeGroups, 1=nodes, 2=fargate
+	nodeGroupFilter     string // empty = show all nodes, otherwise filter by node group name
+	filteredNodes       []ec2.Instance
+
 	// Navigation targets for clickable fields
 	navTargets map[string]navigation.Route
 }
@@ -44,9 +49,10 @@ type DetailView struct {
 // NewDetailView creates a new EKS detail view.
 func NewDetailView(navigator Navigator, clusterName string) *DetailView {
 	v := &DetailView{
-		navigator:  navigator,
-		name:       clusterName,
-		navTargets: make(map[string]navigation.Route),
+		navigator:         navigator,
+		name:              clusterName,
+		navTargets:        make(map[string]navigation.Route),
+		computeFocusIndex: 0,
 	}
 
 	// Overview tab
@@ -226,10 +232,22 @@ func (v *DetailView) Shortcuts() []components.Shortcut {
 	case "Overview", "Networking":
 		return append(base, components.Shortcut{Key: "Enter", Label: "navigate"})
 	case "Compute":
-		return append(base,
+		shortcuts := append(base,
+			components.Shortcut{Key: "Tab", Label: "switch section"},
 			components.Shortcut{Key: "s", Label: "sort-by"},
 			components.Shortcut{Key: "d", Label: "sort-dir"},
 		)
+		// Add context-sensitive Enter hint
+		switch v.computeFocusIndex {
+		case 0: // Node Groups
+			shortcuts = append(shortcuts, components.Shortcut{Key: "Enter", Label: "filter nodes"})
+		case 1: // Nodes
+			shortcuts = append(shortcuts, components.Shortcut{Key: "Enter", Label: "→ EC2 detail"})
+		}
+		if v.nodeGroupFilter != "" {
+			shortcuts = append(shortcuts, components.Shortcut{Key: "C", Label: "clear filter"})
+		}
+		return shortcuts
 	case "Tags":
 		return append(base,
 			components.Shortcut{Key: "s", Label: "sort-by"},
@@ -422,11 +440,10 @@ func (v *DetailView) rebuildOverview() {
 func (v *DetailView) rebuildCompute() {
 	v.mu.RLock()
 	nodeGroups := v.nodeGroups
-	nodes := v.nodes
 	fargateProfiles := v.fargateProfiles
 	v.mu.RUnlock()
 
-	// Node Groups table
+	// Node Groups table - with navigation indicator
 	var ngRows []components.Row
 	for _, ng := range nodeGroups {
 		statusColor := statusToColor(ng.Status)
@@ -439,7 +456,7 @@ func (v *DetailView) rebuildCompute() {
 		ngRows = append(ngRows, components.Row{
 			ID: ng.Name,
 			Cells: []string{
-				ng.Name,
+				ng.Name + " ↩", // Navigation indicator - filters nodes
 				ng.Status,
 				ng.CapacityType,
 				instances,
@@ -447,7 +464,7 @@ func (v *DetailView) rebuildCompute() {
 				scaling,
 			},
 			Colors: []tcell.Color{
-				tcell.ColorWhite,
+				tcell.ColorDodgerBlue, // Navigable
 				statusColor,
 				tcell.ColorLightGray,
 				tcell.ColorLightGray,
@@ -458,44 +475,8 @@ func (v *DetailView) rebuildCompute() {
 	}
 	v.nodeGroupsTable.SetRows(ngRows)
 
-	// Nodes table (EC2 instances)
-	var nodeRows []components.Row
-	for _, inst := range nodes {
-		stateColor := tcell.ColorGreen
-		if inst.State != "running" {
-			stateColor = tcell.ColorYellow
-		}
-		if inst.State == "terminated" || inst.State == "stopped" {
-			stateColor = tcell.ColorRed
-		}
-
-		// Try to get node group name from tags
-		nodeGroup := "-"
-		if ng, ok := inst.Tags["eks:nodegroup-name"]; ok {
-			nodeGroup = ng
-		}
-
-		nodeRows = append(nodeRows, components.Row{
-			ID: inst.InstanceID,
-			Cells: []string{
-				inst.InstanceID,
-				nodeGroup,
-				inst.State,
-				inst.Type,
-				inst.AZ,
-				inst.PrivateIP,
-			},
-			Colors: []tcell.Color{
-				tcell.ColorWhite,
-				tcell.ColorLightGray,
-				stateColor,
-				tcell.ColorLightGray,
-				tcell.ColorLightGray,
-				tcell.ColorLightGray,
-			},
-		})
-	}
-	v.nodesTable.SetRows(nodeRows)
+	// Nodes table - delegate to rebuildNodesTable (handles filtering)
+	v.rebuildNodesTable()
 
 	// Fargate profiles table
 	var fpRows []components.Row
@@ -508,8 +489,8 @@ func (v *DetailView) rebuildCompute() {
 			s := sel.Namespace
 			if len(sel.Labels) > 0 {
 				var labels []string
-				for k, v := range sel.Labels {
-					labels = append(labels, fmt.Sprintf("%s=%s", k, v))
+				for k, labelVal := range sel.Labels {
+					labels = append(labels, fmt.Sprintf("%s=%s", k, labelVal))
 				}
 				s += " (" + strings.Join(labels, ", ") + ")"
 			}
@@ -545,6 +526,9 @@ func (v *DetailView) rebuildCompute() {
 		})
 	}
 	v.fargateTable.SetRows(fpRows)
+
+	// Set up visual focus indicators
+	v.updateComputeFocus()
 }
 
 // rebuildNetworking populates the networking table.
@@ -743,10 +727,27 @@ func (v *DetailView) rebuildTags() {
 
 // handleInput processes view-specific keys.
 func (v *DetailView) handleInput(event *tcell.EventKey) *tcell.EventKey {
+	tabName := v.tabs.CurrentPageName()
+
 	switch event.Key() {
+	case tcell.KeyTab:
+		// Tab switches between sections in Compute tab
+		if tabName == "Compute" {
+			v.computeFocusIndex = (v.computeFocusIndex + 1) % 3
+			v.updateComputeFocus()
+			v.navigator.RefreshShortcuts()
+			return nil
+		}
+	case tcell.KeyBacktab:
+		// Shift+Tab goes backwards
+		if tabName == "Compute" {
+			v.computeFocusIndex = (v.computeFocusIndex + 2) % 3 // +2 is same as -1 mod 3
+			v.updateComputeFocus()
+			v.navigator.RefreshShortcuts()
+			return nil
+		}
 	case tcell.KeyEnter:
 		// Handle navigation for Overview and Networking tabs
-		tabName := v.tabs.CurrentPageName()
 		if tabName == "Overview" || tabName == "Networking" {
 			var table *tview.Table
 			if tabName == "Overview" {
@@ -758,6 +759,37 @@ func (v *DetailView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 			key := fmt.Sprintf("%s:%d", strings.ToLower(tabName), row)
 			if route, ok := v.navTargets[key]; ok {
 				v.navigator.Navigate(route)
+				return nil
+			}
+		}
+		// Handle Compute tab Enter
+		if tabName == "Compute" {
+			switch v.computeFocusIndex {
+			case 0: // Node Groups - filter nodes
+				id := v.nodeGroupsTable.GetRowID()
+				if id != "" {
+					if v.nodeGroupFilter == id {
+						// Toggle off filter
+						v.nodeGroupFilter = ""
+						v.navigator.SetStatus("Showing all nodes")
+					} else {
+						v.nodeGroupFilter = id
+						v.navigator.SetStatus(fmt.Sprintf("Filtered to node group: %s", id))
+					}
+					v.rebuildNodesTable()
+					v.navigator.RefreshShortcuts()
+				}
+				return nil
+			case 1: // Nodes - navigate to EC2 detail
+				id := v.nodesTable.GetRowID()
+				if id != "" {
+					v.navigator.Navigate(navigation.Route{
+						Resource:   "ec2-detail",
+						ResourceID: id,
+					})
+				}
+				return nil
+			case 2: // Fargate - no navigation yet
 				return nil
 			}
 		}
@@ -778,7 +810,103 @@ func (v *DetailView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 			})
 		}()
 		return nil
+	case 'C', 'c':
+		// Clear node group filter
+		if tabName == "Compute" && v.nodeGroupFilter != "" {
+			v.nodeGroupFilter = ""
+			v.rebuildNodesTable()
+			v.navigator.SetStatus("Filter cleared - showing all nodes")
+			v.navigator.RefreshShortcuts()
+			return nil
+		}
 	}
 
 	return event
+}
+
+// updateComputeFocus sets the visual focus on the appropriate compute table.
+func (v *DetailView) updateComputeFocus() {
+	// Update flex item focus states - tview doesn't have great support for this,
+	// so we rely on the table borders/titles to indicate which is active
+	tables := []*components.SortableTable{v.nodeGroupsTable, v.nodesTable, v.fargateTable}
+	for i, t := range tables {
+		if i == v.computeFocusIndex {
+			t.Table.SetBorderColor(tcell.ColorDodgerBlue)
+			t.Table.SetTitleColor(tcell.ColorDodgerBlue)
+		} else {
+			t.Table.SetBorderColor(tcell.ColorGray)
+			t.Table.SetTitleColor(tcell.ColorGray)
+		}
+	}
+}
+
+// rebuildNodesTable rebuilds the nodes table with current filter.
+func (v *DetailView) rebuildNodesTable() {
+	v.mu.RLock()
+	allNodes := v.nodes
+	filter := v.nodeGroupFilter
+	v.mu.RUnlock()
+
+	// Filter nodes by node group if filter is set
+	var nodesToShow []ec2.Instance
+	if filter == "" {
+		nodesToShow = allNodes
+	} else {
+		for _, inst := range allNodes {
+			if ng, ok := inst.Tags["eks:nodegroup-name"]; ok && ng == filter {
+				nodesToShow = append(nodesToShow, inst)
+			}
+		}
+	}
+
+	v.mu.Lock()
+	v.filteredNodes = nodesToShow
+	v.mu.Unlock()
+
+	// Build rows
+	var nodeRows []components.Row
+	for _, inst := range nodesToShow {
+		stateColor := tcell.ColorGreen
+		if inst.State != "running" {
+			stateColor = tcell.ColorYellow
+		}
+		if inst.State == "terminated" || inst.State == "stopped" {
+			stateColor = tcell.ColorRed
+		}
+
+		// Get node group name from tags
+		nodeGroup := "-"
+		if ng, ok := inst.Tags["eks:nodegroup-name"]; ok {
+			nodeGroup = ng
+		}
+
+		nodeRows = append(nodeRows, components.Row{
+			ID: inst.InstanceID,
+			Cells: []string{
+				inst.InstanceID + " ↩", // Add navigation indicator
+				nodeGroup,
+				inst.State,
+				inst.Type,
+				inst.AZ,
+				inst.PrivateIP,
+			},
+			Colors: []tcell.Color{
+				tcell.ColorDodgerBlue, // Navigable color
+				tcell.ColorLightGray,
+				stateColor,
+				tcell.ColorLightGray,
+				tcell.ColorLightGray,
+				tcell.ColorLightGray,
+			},
+		})
+	}
+
+	// Update title to show filter status
+	if filter != "" {
+		v.nodesTable.Table.SetTitle(fmt.Sprintf(" Nodes [%s] ", filter))
+	} else {
+		v.nodesTable.Table.SetTitle(" Nodes ")
+	}
+
+	v.nodesTable.SetRows(nodeRows)
 }
