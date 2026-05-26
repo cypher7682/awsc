@@ -64,6 +64,16 @@ type UserConfig struct {
 	// Uses Go text/template syntax. Available fields: {{ .Profile }}, {{ .Region }}, {{ .InstanceID }}
 	// Example: "aws ssm start-session --target {{ .InstanceID }} --profile {{ .Profile }} --region {{ .Region }}"
 	EC2ConnectCmd string `yaml:"ec2_connect_cmd"`
+
+	// ECRLoginCmd is a shell command to authenticate Docker with ECR.
+	// Uses Go text/template syntax. Available fields: {{ .Profile }}, {{ .Region }}, {{ .RegistryURI }}
+	// Example: "aws ecr get-login-password --profile {{ .Profile }} --region {{ .Region }} | docker login --username AWS --password-stdin {{ .RegistryURI }}"
+	ECRLoginCmd string `yaml:"ecr_login_cmd"`
+
+	// ECRFetchCmd is a shell command to pull an image from ECR.
+	// Uses Go text/template syntax. Available fields: {{ .Profile }}, {{ .Region }}, {{ .ImageURI }}, {{ .RepoName }}, {{ .ImageTag }}
+	// Example: "docker pull {{ .ImageURI }}"
+	ECRFetchCmd string `yaml:"ecr_fetch_cmd"`
 }
 
 // CmdContext holds template data available to all command templates.
@@ -71,6 +81,11 @@ type CmdContext struct {
 	Profile    string
 	Region     string
 	InstanceID string
+	// ECR fields
+	RegistryURI string // e.g., 123456789.dkr.ecr.eu-west-1.amazonaws.com
+	RepoName    string // e.g., myrepo
+	ImageURI    string // e.g., 123456789.dkr.ecr.eu-west-1.amazonaws.com/myrepo:latest
+	ImageTag    string // e.g., latest
 }
 
 // resolveTemplate renders a Go text/template string with the given context.
@@ -116,6 +131,43 @@ func (uc *UserConfig) ResolveEC2ConnectCmd(profile, region, instanceID string) (
 // HasEC2ConnectCmd returns true if an EC2 connect command is configured.
 func (uc *UserConfig) HasEC2ConnectCmd() bool {
 	return uc != nil && uc.EC2ConnectCmd != ""
+}
+
+// Default ECR commands (used when not configured).
+const (
+	DefaultECRLoginCmd = `aws ecr get-login-password --region {{ .Region }} --profile {{ .Profile }} | docker login --username AWS --password-stdin {{ .RegistryURI }}`
+	DefaultECRFetchCmd = `docker pull {{ .ImageURI }}`
+)
+
+// ResolveECRLoginCmd renders the ecr_login_cmd template with profile, region, and registry URI.
+// Uses the standard AWS ECR login command if not configured.
+func (uc *UserConfig) ResolveECRLoginCmd(profile, region, registryURI string) (string, error) {
+	tmpl := DefaultECRLoginCmd
+	if uc != nil && uc.ECRLoginCmd != "" {
+		tmpl = uc.ECRLoginCmd
+	}
+	return resolveTemplate(tmpl, CmdContext{
+		Profile:     profile,
+		Region:      region,
+		RegistryURI: registryURI,
+	})
+}
+
+// ResolveECRFetchCmd renders the ecr_fetch_cmd template with all ECR context fields.
+// Uses `docker pull` if not configured.
+func (uc *UserConfig) ResolveECRFetchCmd(profile, region, registryURI, repoName, imageURI, imageTag string) (string, error) {
+	tmpl := DefaultECRFetchCmd
+	if uc != nil && uc.ECRFetchCmd != "" {
+		tmpl = uc.ECRFetchCmd
+	}
+	return resolveTemplate(tmpl, CmdContext{
+		Profile:     profile,
+		Region:      region,
+		RegistryURI: registryURI,
+		RepoName:    repoName,
+		ImageURI:    imageURI,
+		ImageTag:    imageTag,
+	})
 }
 
 // DefaultConfigPath returns the path to ~/.config/awsc/config.yaml.

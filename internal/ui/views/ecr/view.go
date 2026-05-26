@@ -22,6 +22,8 @@ type Navigator interface {
 	Context() context.Context
 	ShowConfirm(prompt string, onConfirm func())
 	SetStatus(text string)
+	RunECRLoginCmd(registryURI string) bool
+	RunECRFetchCmd(registryURI, repoName, imageURI, imageTag string) bool
 }
 
 // --- ECR Repository List View ---
@@ -91,6 +93,7 @@ func (v *ListView) Refresh(ctx context.Context) error {
 func (v *ListView) Shortcuts() []components.Shortcut {
 	return []components.Shortcut{
 		{Key: "Enter", Label: "images"},
+		{Key: "l", Label: "login"},
 		{Key: "c", Label: "create"},
 		{Key: "Del", Label: "delete"},
 		{Key: "s", Label: "sort-by"},
@@ -214,6 +217,24 @@ func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 	}
 
 	switch event.Rune() {
+	case 'l':
+		// Login to ECR - extract registry URI from any repo
+		v.mu.RLock()
+		if len(v.repos) == 0 {
+			v.mu.RUnlock()
+			v.navigator.SetStatus("[yellow]No repositories to get registry from")
+			return nil
+		}
+		// Registry URI is the repo URI without the repo name suffix
+		repoURI := v.repos[0].URI
+		v.mu.RUnlock()
+		registryURI := extractRegistryURI(repoURI)
+		if registryURI == "" {
+			v.navigator.SetStatus("[red]Could not determine registry URI")
+			return nil
+		}
+		v.navigator.RunECRLoginCmd(registryURI)
+		return nil
 	case 'R':
 		go func() {
 			v.navigator.TviewApp().QueueUpdateDraw(func() {
@@ -255,6 +276,7 @@ type ImageView struct {
 	st        *components.SortableTable
 	navigator Navigator
 	repoName  string
+	repoURI   string // full repo URI for login/fetch commands
 
 	mu     sync.RWMutex
 	images []ecr.Image
@@ -290,6 +312,16 @@ func (v *ImageView) Render() tview.Primitive {
 // Refresh reloads image data from AWS.
 func (v *ImageView) Refresh(ctx context.Context) error {
 	svc := v.navigator.ECRService()
+
+	// Fetch repo details to get URI (for login/fetch commands)
+	repo, err := svc.GetRepository(ctx, v.repoName)
+	if err != nil {
+		return err
+	}
+	v.mu.Lock()
+	v.repoURI = repo.URI
+	v.mu.Unlock()
+
 	images, err := svc.ListImages(ctx, v.repoName)
 	if err != nil {
 		return err
@@ -306,6 +338,8 @@ func (v *ImageView) Refresh(ctx context.Context) error {
 // Shortcuts returns image view shortcuts.
 func (v *ImageView) Shortcuts() []components.Shortcut {
 	return []components.Shortcut{
+		{Key: "f", Label: "fetch"},
+		{Key: "l", Label: "login"},
 		{Key: "Del", Label: "delete"},
 		{Key: "s", Label: "sort-by"},
 		{Key: "d", Label: "sort-dir"},
@@ -430,6 +464,54 @@ func (v *ImageView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 	}
 
 	switch event.Rune() {
+	case 'l':
+		// Login to ECR
+		v.mu.RLock()
+		repoURI := v.repoURI
+		v.mu.RUnlock()
+		if repoURI == "" {
+			v.navigator.SetStatus("[yellow]No repository URI available - try refreshing")
+			return nil
+		}
+		registryURI := extractRegistryURI(repoURI)
+		v.navigator.RunECRLoginCmd(registryURI)
+		return nil
+	case 'f':
+		// Fetch (pull) selected image
+		idx := v.st.GetSelectedIndex()
+		if idx < 0 {
+			return event
+		}
+		v.mu.RLock()
+		if idx >= len(v.images) {
+			v.mu.RUnlock()
+			return event
+		}
+		img := v.images[idx]
+		repoURI := v.repoURI
+		repoName := v.repoName
+		v.mu.RUnlock()
+
+		if repoURI == "" {
+			v.navigator.SetStatus("[yellow]No repository URI available - try refreshing")
+			return nil
+		}
+
+		// Determine the tag to use (first tag, or digest if untagged)
+		imageTag := ""
+		imageURI := ""
+		if len(img.Tags) > 0 {
+			imageTag = img.Tags[0]
+			imageURI = fmt.Sprintf("%s:%s", repoURI, imageTag)
+		} else {
+			// Use digest for untagged images
+			imageTag = img.Digest
+			imageURI = fmt.Sprintf("%s@%s", repoURI, img.Digest)
+		}
+
+		registryURI := extractRegistryURI(repoURI)
+		v.navigator.RunECRFetchCmd(registryURI, repoName, imageURI, imageTag)
+		return nil
 	case 'R':
 		go func() {
 			v.Refresh(v.navigator.Context())
@@ -448,4 +530,14 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// extractRegistryURI extracts the registry URI from a full repo URI.
+// e.g., "123456789.dkr.ecr.eu-west-1.amazonaws.com/myrepo" -> "123456789.dkr.ecr.eu-west-1.amazonaws.com"
+func extractRegistryURI(repoURI string) string {
+	idx := strings.Index(repoURI, "/")
+	if idx == -1 {
+		return repoURI
+	}
+	return repoURI[:idx]
 }
