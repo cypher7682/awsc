@@ -358,6 +358,18 @@ func TestOmnibox_GetCompletions(t *testing.T) {
 	if items != nil {
 		t.Errorf("expected nil for non-popup command, got %v", items)
 	}
+
+	// Fuzzy matching: "usw2" should match us-west-2
+	items = o.GetCompletions("r=usw2")
+	if len(items) != 1 || items[0] != "r=us-west-2" {
+		t.Errorf("expected [r=us-west-2] for fuzzy 'usw2', got %v", items)
+	}
+
+	// Fuzzy matching: "euw1" should match eu-west-1
+	items = o.GetCompletions("region=euw1")
+	if len(items) != 1 || items[0] != "region=eu-west-1" {
+		t.Errorf("expected [region=eu-west-1] for fuzzy 'euw1', got %v", items)
+	}
 }
 
 func TestTabbedView_Navigation(t *testing.T) {
@@ -604,5 +616,103 @@ func TestBrailleChar(t *testing.T) {
 	ch = brailleChar(grid, 0, 0, 4, 2)
 	if ch != '\u2801' {
 		t.Errorf("expected U+2801, got U+%04X", ch)
+	}
+}
+
+func TestFuzzyScore(t *testing.T) {
+	tests := []struct {
+		query    string
+		target   string
+		wantPos  bool   // expect positive score (match)
+		minScore int    // minimum expected score (0 = any positive)
+		desc     string // description
+	}{
+		// Exact matches
+		{"us-west-2", "us-west-2", true, 1000, "exact match"},
+		{"US-WEST-2", "us-west-2", true, 1000, "exact match case insensitive"},
+
+		// Prefix matches
+		{"us", "us-west-2", true, 500, "prefix match"},
+		{"us-w", "us-west-2", true, 500, "prefix match longer"},
+		{"eu", "eu-west-1", true, 500, "prefix match eu"},
+
+		// Contains matches
+		{"west", "us-west-2", true, 200, "contains match"},
+		{"east", "us-east-1", true, 200, "contains match east"},
+
+		// Fuzzy matches (shortcuts)
+		{"usw2", "us-west-2", true, 100, "fuzzy shortcut usw2"},
+		{"use1", "us-east-1", true, 100, "fuzzy shortcut use1"},
+		{"euw1", "eu-west-1", true, 100, "fuzzy shortcut euw1"},
+		{"apne1", "ap-northeast-1", true, 100, "fuzzy shortcut apne1"},
+		{"rtc-dev", "vng-api-rtc-main-dev", true, 100, "fuzzy mid-string rtc-dev"},
+		{"api-dev", "vng-api-rtc-main-dev", true, 100, "fuzzy mid-string api-dev"},
+
+		// Non-matches (first char must be at word boundary for fuzzy)
+		{"us", "eu-west-1", false, 0, "us should not match eu-west-1 (u not at boundary)"},
+		{"xyz", "us-west-2", false, 0, "no match"},
+		{"abc", "def", false, 0, "completely different"},
+	}
+
+	for _, tt := range tests {
+		score := FuzzyScore(tt.query, tt.target)
+		if tt.wantPos {
+			if score < 0 {
+				t.Errorf("%s: FuzzyScore(%q, %q) = %d, want positive", tt.desc, tt.query, tt.target, score)
+			} else if tt.minScore > 0 && score < tt.minScore {
+				t.Errorf("%s: FuzzyScore(%q, %q) = %d, want >= %d", tt.desc, tt.query, tt.target, score, tt.minScore)
+			}
+		} else {
+			if score >= 0 {
+				t.Errorf("%s: FuzzyScore(%q, %q) = %d, want negative (no match)", tt.desc, tt.query, tt.target, score)
+			}
+		}
+	}
+}
+
+func TestFuzzyFilter(t *testing.T) {
+	regions := []string{"us-east-1", "us-west-2", "eu-west-1", "ap-northeast-1"}
+
+	// usw should match us-west-2 first (prefix-ish), then us-east-1 (shares 'us')
+	matches := FuzzyFilter("usw", regions)
+	if len(matches) == 0 {
+		t.Fatal("expected at least one match for 'usw'")
+	}
+	if matches[0] != "us-west-2" {
+		t.Errorf("expected us-west-2 first, got %s", matches[0])
+	}
+
+	// euw1 should match eu-west-1
+	matches = FuzzyFilter("euw1", regions)
+	if len(matches) == 0 || matches[0] != "eu-west-1" {
+		t.Errorf("expected eu-west-1 for 'euw1', got %v", matches)
+	}
+
+	// Empty query returns all sorted
+	matches = FuzzyFilter("", regions)
+	if len(matches) != 4 {
+		t.Errorf("expected 4 results for empty query, got %d", len(matches))
+	}
+}
+
+func TestFuzzyBest(t *testing.T) {
+	regions := []string{"us-east-1", "us-west-2", "eu-west-1"}
+
+	// Exact prefix
+	best := FuzzyBest("us-west", regions)
+	if best != "us-west-2" {
+		t.Errorf("expected us-west-2, got %s", best)
+	}
+
+	// Fuzzy shortcut
+	best = FuzzyBest("usw2", regions)
+	if best != "us-west-2" {
+		t.Errorf("expected us-west-2 for 'usw2', got %s", best)
+	}
+
+	// No match
+	best = FuzzyBest("xyz", regions)
+	if best != "" {
+		t.Errorf("expected empty for no match, got %s", best)
 	}
 }

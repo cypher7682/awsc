@@ -224,11 +224,15 @@ func (o *Omnibox) GetCompletions(currentText string) []string {
 	if profileLabel != "" {
 		var matches []string
 		for _, p := range o.profiles {
-			if profilePrefix == "" || strings.Contains(strings.ToLower(p), profilePrefix) {
+			if profilePrefix == "" || FuzzyScore(profilePrefix, p) >= 0 {
 				matches = append(matches, profileLabel+p)
 			}
 		}
-		sort.Strings(matches)
+		if profilePrefix != "" {
+			matches = sortByFuzzyScore(matches, profileLabel, profilePrefix)
+		} else {
+			sort.Strings(matches)
+		}
 		return matches
 	}
 
@@ -245,11 +249,15 @@ func (o *Omnibox) GetCompletions(currentText string) []string {
 	if regionLabel != "" {
 		var matches []string
 		for _, r := range o.regions {
-			if regionPrefix == "" || strings.Contains(r, regionPrefix) {
+			if regionPrefix == "" || FuzzyScore(regionPrefix, r) >= 0 {
 				matches = append(matches, regionLabel+r)
 			}
 		}
-		sort.Strings(matches)
+		if regionPrefix != "" {
+			matches = sortByFuzzyScore(matches, regionLabel, regionPrefix)
+		} else {
+			sort.Strings(matches)
+		}
 		return matches
 	}
 
@@ -277,11 +285,16 @@ func (o *Omnibox) commandAutocomplete(currentText string) []string {
 	if profileLabel != "" {
 		var matches []string
 		for _, p := range o.profiles {
-			if profilePrefix == "" || strings.HasPrefix(strings.ToLower(p), profilePrefix) {
+			if profilePrefix == "" || FuzzyScore(profilePrefix, p) >= 0 {
 				matches = append(matches, profileLabel+p)
 			}
 		}
-		sort.Strings(matches)
+		// Sort by fuzzy score
+		if profilePrefix != "" {
+			matches = sortByFuzzyScore(matches, profileLabel, profilePrefix)
+		} else {
+			sort.Strings(matches)
+		}
 		return matches
 	}
 
@@ -298,17 +311,22 @@ func (o *Omnibox) commandAutocomplete(currentText string) []string {
 	if regionLabel != "" {
 		var matches []string
 		for _, r := range o.regions {
-			if regionPrefix == "" || strings.HasPrefix(r, regionPrefix) {
+			if regionPrefix == "" || FuzzyScore(regionPrefix, r) >= 0 {
 				matches = append(matches, regionLabel+r)
 			}
 		}
-		sort.Strings(matches)
+		// Sort by fuzzy score
+		if regionPrefix != "" {
+			matches = sortByFuzzyScore(matches, regionLabel, regionPrefix)
+		} else {
+			sort.Strings(matches)
+		}
 		return matches
 	}
 
 	// Base command suggestions
 	commands := []string{
-		"ec2", "ecr", "services", "sg", "vpc", "subnet",
+		"ec2", "ecr", "eks", "services", "sg", "vpc", "subnet",
 		"region", "profile", "quit", "help",
 	}
 
@@ -368,4 +386,31 @@ func (o *Omnibox) filterAutocomplete(currentText string) []string {
 		}
 	}
 	return matches
+}
+
+// sortByFuzzyScore sorts prefixed matches (e.g., "region=us-west-2") by fuzzy score.
+// The prefix (e.g., "region=") is stripped for scoring, then re-added.
+func sortByFuzzyScore(matches []string, prefix, query string) []string {
+	type scored struct {
+		full  string
+		value string
+		score int
+	}
+	var scored_ []scored
+	for _, m := range matches {
+		value := strings.TrimPrefix(m, prefix)
+		score := FuzzyScore(query, value)
+		scored_ = append(scored_, scored{full: m, value: value, score: score})
+	}
+	sort.Slice(scored_, func(i, j int) bool {
+		if scored_[i].score != scored_[j].score {
+			return scored_[i].score > scored_[j].score
+		}
+		return scored_[i].value < scored_[j].value
+	})
+	result := make([]string, len(scored_))
+	for i, s := range scored_ {
+		result[i] = s.full
+	}
+	return result
 }

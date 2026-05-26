@@ -521,7 +521,14 @@ func (a *App) OnCommand(command string) {
 
 	// Handle profile= commands
 	if strings.HasPrefix(command, "profile=") {
-		profile := strings.TrimPrefix(command, "profile=")
+		profileInput := strings.TrimPrefix(command, "profile=")
+		// Fuzzy resolve the profile
+		profiles := config.LoadProfiles()
+		profile := components.FuzzyBest(profileInput, profiles)
+		if profile == "" {
+			a.omnibox.SetStatus(fmt.Sprintf("[red]No profile matching '%s'", profileInput))
+			return
+		}
 		err := a.session.SetProfile(a.ctx, profile)
 		if err != nil {
 			a.omnibox.SetStatus(fmt.Sprintf("[red]Failed to set profile: %s", err.Error()))
