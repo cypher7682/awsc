@@ -16,6 +16,7 @@ import (
 	"github.com/tpriestnall/awsc/internal/aws/ec2"
 	"github.com/tpriestnall/awsc/internal/aws/ecr"
 	"github.com/tpriestnall/awsc/internal/aws/eks"
+	"github.com/tpriestnall/awsc/internal/aws/secretsmanager"
 	"github.com/tpriestnall/awsc/internal/config"
 	"github.com/tpriestnall/awsc/internal/navigation"
 	"github.com/tpriestnall/awsc/internal/ui/components"
@@ -63,6 +64,7 @@ type App struct {
 	ec2Service  *ec2.Service
 	ecrService  *ecr.Service
 	eksService  *eks.Service
+	smService   *secretsmanager.Service
 	cwService   *cloudwatch.Service
 
 	// Views
@@ -193,6 +195,11 @@ func (a *App) ECRService() *ecr.Service {
 // EKSService returns the EKS service instance.
 func (a *App) EKSService() *eks.Service {
 	return a.eksService
+}
+
+// SecretsManagerService returns the Secrets Manager service instance.
+func (a *App) SecretsManagerService() *secretsmanager.Service {
+	return a.smService
 }
 
 // CloudWatchService returns the CloudWatch service instance.
@@ -389,6 +396,7 @@ func (a *App) rebuildServices() {
 	a.ec2Service = ec2.NewServiceFromClient(a.session.EC2Client())
 	a.ecrService = ecr.NewServiceFromClient(a.session.ECRClient())
 	a.eksService = eks.NewServiceFromClient(a.session.EKSClient())
+	a.smService = secretsmanager.NewServiceFromClient(a.session.SecretsManagerClient())
 	a.cwService = cloudwatch.NewServiceFromClient(a.session.CloudWatchClient())
 }
 

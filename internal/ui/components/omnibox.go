@@ -326,7 +326,7 @@ func (o *Omnibox) commandAutocomplete(currentText string) []string {
 
 	// Base command suggestions
 	commands := []string{
-		"ec2", "ecr", "eks", "services", "sg", "vpc", "subnet",
+		"ec2", "ecr", "eks", "asm", "services", "sg", "vpc", "subnet",
 		"region", "profile", "quit", "help",
 	}
 

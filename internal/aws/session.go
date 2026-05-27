@@ -13,6 +13,7 @@ import (
 	awsec2 "github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 )
 
 // Session is the unified AWS session. All service layers use this to get
@@ -28,6 +29,7 @@ type Session struct {
 	ecrClient *ecr.Client
 	eksClient *eks.Client
 	cwClient  *cloudwatch.Client
+	smClient  *secretsmanager.Client
 }
 
 // NewSession creates a new AWS session with the given profile and region.
@@ -95,6 +97,13 @@ func (s *Session) EKSClient() *eks.Client {
 	return s.eksClient
 }
 
+// SecretsManagerClient returns the shared Secrets Manager SDK client.
+func (s *Session) SecretsManagerClient() *secretsmanager.Client {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.smClient
+}
+
 // SetRegion updates the region and rebuilds all clients.
 func (s *Session) SetRegion(ctx context.Context, region string) error {
 	cfg, err := loadConfig(ctx, s.profile, region)
@@ -146,6 +155,7 @@ func (s *Session) rebuildClients() {
 	s.ecrClient = ecr.NewFromConfig(s.cfg)
 	s.eksClient = eks.NewFromConfig(s.cfg)
 	s.cwClient = cloudwatch.NewFromConfig(s.cfg)
+	s.smClient = secretsmanager.NewFromConfig(s.cfg)
 }
 
 // loadConfig loads AWS SDK config for a given profile and region.
