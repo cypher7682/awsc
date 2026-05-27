@@ -729,6 +729,41 @@ func (v *DetailView) rebuildTags() {
 func (v *DetailView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 	tabName := v.tabs.CurrentPageName()
 
+	// Route Up/Down to the focused table in Compute tab
+	if tabName == "Compute" {
+		switch event.Key() {
+		case tcell.KeyUp, tcell.KeyDown:
+			table := v.getActiveComputeTable()
+			if table != nil {
+				// Forward to the table's input handler
+				handler := table.Table.InputHandler()
+				if handler != nil {
+					handler(event, func(p tview.Primitive) {})
+					return nil
+				}
+			}
+		}
+		// Also handle j/k for vim-style navigation
+		switch event.Rune() {
+		case 'j':
+			table := v.getActiveComputeTable()
+			if table != nil {
+				row, col := table.Table.GetSelection()
+				table.Table.Select(row+1, col)
+				return nil
+			}
+		case 'k':
+			table := v.getActiveComputeTable()
+			if table != nil {
+				row, col := table.Table.GetSelection()
+				if row > 1 { // Don't go above header
+					table.Table.Select(row-1, col)
+				}
+				return nil
+			}
+		}
+	}
+
 	switch event.Key() {
 	case tcell.KeyTab:
 		// Tab switches between sections in Compute tab
@@ -838,6 +873,19 @@ func (v *DetailView) updateComputeFocus() {
 			t.Table.SetTitleColor(tcell.ColorGray)
 		}
 	}
+}
+
+// getActiveComputeTable returns the currently focused table in the Compute tab.
+func (v *DetailView) getActiveComputeTable() *components.SortableTable {
+	switch v.computeFocusIndex {
+	case 0:
+		return v.nodeGroupsTable
+	case 1:
+		return v.nodesTable
+	case 2:
+		return v.fargateTable
+	}
+	return nil
 }
 
 // rebuildNodesTable rebuilds the nodes table with current filter.
