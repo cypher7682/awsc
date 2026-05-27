@@ -376,6 +376,7 @@ func (a *App) HandleAuthError(err error) bool {
 		return false
 	}
 	if !a.config.User.HasLoginCmd() {
+		a.omnibox.SetStatus("[red]Session expired. Configure login_cmd in ~/.config/awsc/config.yaml to automate re-authentication")
 		return false
 	}
 
