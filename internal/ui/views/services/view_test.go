@@ -8,11 +8,16 @@ import (
 )
 
 type mockNavigator struct {
-	lastRoute navigation.Route
+	lastRoute  navigation.Route
+	lastStatus string
 }
 
 func (m *mockNavigator) Navigate(route navigation.Route) {
 	m.lastRoute = route
+}
+
+func (m *mockNavigator) SetStatus(text string) {
+	m.lastStatus = text
 }
 
 func TestNewView(t *testing.T) {
