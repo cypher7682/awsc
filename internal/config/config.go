@@ -11,6 +11,7 @@ import (
 	"strings"
 	"text/template"
 
+	"al.essio.dev/pkg/shellescape"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"gopkg.in/yaml.v3"
@@ -103,11 +104,15 @@ func resolveTemplate(tmplStr string, ctx CmdContext) (string, error) {
 }
 
 // ResolveLoginCmd renders the login_cmd template with profile and region.
+// All values are shell-escaped to prevent command injection.
 func (uc *UserConfig) ResolveLoginCmd(profile, region string) (string, error) {
 	if uc == nil || uc.LoginCmd == "" {
 		return "", nil
 	}
-	return resolveTemplate(uc.LoginCmd, CmdContext{Profile: profile, Region: region})
+	return resolveTemplate(uc.LoginCmd, CmdContext{
+		Profile: shellescape.Quote(profile),
+		Region:  shellescape.Quote(region),
+	})
 }
 
 // HasLoginCmd returns true if a login command is configured.
@@ -116,15 +121,15 @@ func (uc *UserConfig) HasLoginCmd() bool {
 }
 
 // ResolveEC2ConnectCmd renders the ec2_connect_cmd template with profile, region,
-// and instance ID.
+// and instance ID. All values are shell-escaped to prevent command injection.
 func (uc *UserConfig) ResolveEC2ConnectCmd(profile, region, instanceID string) (string, error) {
 	if uc == nil || uc.EC2ConnectCmd == "" {
 		return "", nil
 	}
 	return resolveTemplate(uc.EC2ConnectCmd, CmdContext{
-		Profile:    profile,
-		Region:     region,
-		InstanceID: instanceID,
+		Profile:    shellescape.Quote(profile),
+		Region:     shellescape.Quote(region),
+		InstanceID: shellescape.Quote(instanceID),
 	})
 }
 
@@ -141,32 +146,34 @@ const (
 
 // ResolveECRLoginCmd renders the ecr_login_cmd template with profile, region, and registry URI.
 // Uses the standard AWS ECR login command if not configured.
+// All values are shell-escaped to prevent command injection.
 func (uc *UserConfig) ResolveECRLoginCmd(profile, region, registryURI string) (string, error) {
 	tmpl := DefaultECRLoginCmd
 	if uc != nil && uc.ECRLoginCmd != "" {
 		tmpl = uc.ECRLoginCmd
 	}
 	return resolveTemplate(tmpl, CmdContext{
-		Profile:     profile,
-		Region:      region,
-		RegistryURI: registryURI,
+		Profile:     shellescape.Quote(profile),
+		Region:      shellescape.Quote(region),
+		RegistryURI: shellescape.Quote(registryURI),
 	})
 }
 
 // ResolveECRFetchCmd renders the ecr_fetch_cmd template with all ECR context fields.
 // Uses `docker pull` if not configured.
+// All values are shell-escaped to prevent command injection.
 func (uc *UserConfig) ResolveECRFetchCmd(profile, region, registryURI, repoName, imageURI, imageTag string) (string, error) {
 	tmpl := DefaultECRFetchCmd
 	if uc != nil && uc.ECRFetchCmd != "" {
 		tmpl = uc.ECRFetchCmd
 	}
 	return resolveTemplate(tmpl, CmdContext{
-		Profile:     profile,
-		Region:      region,
-		RegistryURI: registryURI,
-		RepoName:    repoName,
-		ImageURI:    imageURI,
-		ImageTag:    imageTag,
+		Profile:     shellescape.Quote(profile),
+		Region:      shellescape.Quote(region),
+		RegistryURI: shellescape.Quote(registryURI),
+		RepoName:    shellescape.Quote(repoName),
+		ImageURI:    shellescape.Quote(imageURI),
+		ImageTag:    shellescape.Quote(imageTag),
 	})
 }
 
