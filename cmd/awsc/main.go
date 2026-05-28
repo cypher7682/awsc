@@ -46,6 +46,9 @@ func main() {
 	// Register views
 	app.RegisterView(servicesview.NewView(app))
 	app.RegisterView(ec2view.NewListView(app))
+	app.RegisterView(ec2view.NewInstanceTypesView(app))
+	app.RegisterView(ec2view.NewLaunchTemplatesView(app))
+	app.RegisterView(ec2view.NewSpotRequestsView(app))
 	app.RegisterView(ecrview.NewListView(app))
 	app.RegisterView(eksview.NewListView(app))
 	app.RegisterView(smview.NewListView(app))
@@ -56,6 +59,12 @@ func main() {
 	// Register view factories (dynamic views needing route params)
 	app.RegisterViewFactory("ec2-detail", func(route navigation.Route) ui.View {
 		return ec2view.NewDetailView(app, route.ResourceID)
+	})
+	app.RegisterViewFactory("ec2/launch-template-detail", func(route navigation.Route) ui.View {
+		return ec2view.NewLaunchTemplateDetailView(app, route.ResourceID)
+	})
+	app.RegisterViewFactory("ec2/spot-detail", func(route navigation.Route) ui.View {
+		return ec2view.NewSpotRequestDetailView(app, route.ResourceID)
 	})
 	app.RegisterViewFactory("vpc-detail", func(route navigation.Route) ui.View {
 		return vpcview.NewDetailView(app, route.ResourceID)

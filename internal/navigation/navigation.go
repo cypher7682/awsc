@@ -133,15 +133,93 @@ func (cr *CommandRegistry) registerDefaults() {
 	cr.commands["services"] = func(_ string) Route {
 		return Route{Resource: "services"}
 	}
+	
+	// EC2 commands - all resolve to the "ec2" view
 	cr.commands["ec2"] = func(_ string) Route {
 		return Route{Resource: "ec2"}
 	}
+	cr.commands["ec2/instances"] = func(_ string) Route {
+		return Route{Resource: "ec2"}
+	}
+	
+	// EC2 Instance Types
+	cr.commands["ec2/instance-types"] = func(_ string) Route {
+		return Route{Resource: "ec2/instance-types"}
+	}
+	
+	// EC2 Launch Templates
+	cr.commands["ec2/launch-templates"] = func(_ string) Route {
+		return Route{Resource: "ec2/launch-templates"}
+	}
+	
+	// EC2 Spot Requests
+	cr.commands["ec2/spot"] = func(_ string) Route {
+		return Route{Resource: "ec2/spot"}
+	}
+	
+	// Security Groups - accessible via ec2/sg or sg
+	cr.commands["sg"] = func(_ string) Route {
+		return Route{Resource: "sg"}
+	}
+	cr.commands["ec2/sg"] = func(_ string) Route {
+		return Route{Resource: "sg"}
+	}
+	
+	// Load Balancing (planned) - ec2/elb defaults to ec2/elb/lb
+	cr.commands["elb"] = func(_ string) Route {
+		return Route{Resource: "ec2/elb/lb"}
+	}
+	cr.commands["ec2/elb"] = func(_ string) Route {
+		return Route{Resource: "ec2/elb/lb"}
+	}
+	cr.commands["ec2/elb/lb"] = func(_ string) Route {
+		return Route{Resource: "ec2/elb/lb"}
+	}
+	cr.commands["ec2/elb/tg"] = func(_ string) Route {
+		return Route{Resource: "ec2/elb/tg"}
+	}
+	
+	// Auto Scaling (planned) - ec2/asg defaults to ec2/asg/groups
+	cr.commands["asg"] = func(_ string) Route {
+		return Route{Resource: "ec2/asg/groups"}
+	}
+	cr.commands["ec2/asg"] = func(_ string) Route {
+		return Route{Resource: "ec2/asg/groups"}
+	}
+	cr.commands["ec2/asg/groups"] = func(_ string) Route {
+		return Route{Resource: "ec2/asg/groups"}
+	}
+	
+	// VPC commands
+	cr.commands["vpc"] = func(_ string) Route {
+		return Route{Resource: "vpc"}
+	}
+	cr.commands["vpc/vpcs"] = func(_ string) Route {
+		return Route{Resource: "vpc"}
+	}
+	
+	// Subnet commands
+	cr.commands["subnet"] = func(_ string) Route {
+		return Route{Resource: "subnet"}
+	}
+	cr.commands["subnets"] = func(_ string) Route {
+		return Route{Resource: "subnet"}
+	}
+	cr.commands["vpc/subnets"] = func(_ string) Route {
+		return Route{Resource: "subnet"}
+	}
+	
+	// ECR
 	cr.commands["ecr"] = func(_ string) Route {
 		return Route{Resource: "ecr"}
 	}
+	
+	// EKS
 	cr.commands["eks"] = func(_ string) Route {
 		return Route{Resource: "eks"}
 	}
+	
+	// Secrets Manager
 	cr.commands["asm"] = func(_ string) Route {
 		return Route{Resource: "asm"}
 	}
@@ -150,17 +228,5 @@ func (cr *CommandRegistry) registerDefaults() {
 	}
 	cr.commands["secretsmanager"] = func(_ string) Route {
 		return Route{Resource: "asm"}
-	}
-	cr.commands["sg"] = func(_ string) Route {
-		return Route{Resource: "sg"}
-	}
-	cr.commands["vpc"] = func(_ string) Route {
-		return Route{Resource: "vpc"}
-	}
-	cr.commands["subnet"] = func(_ string) Route {
-		return Route{Resource: "subnet"}
-	}
-	cr.commands["subnets"] = func(_ string) Route {
-		return Route{Resource: "subnet"}
 	}
 }

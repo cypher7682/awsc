@@ -135,22 +135,37 @@ func TestListView_FilterFields(t *testing.T) {
 }
 
 func TestListView_Shortcuts(t *testing.T) {
+	// Build columns from defaults
+	var cols []components.Column
+	for _, c := range defaultEC2Columns {
+		if c.Enabled {
+			cols = append(cols, components.Column{
+				Title:     c.Title,
+				Field:     c.Field,
+				Expansion: c.Expansion,
+			})
+		}
+	}
+
 	v := &ListView{
 		st: components.NewSortableTable(components.SortableTableConfig{
 			Title:   "test",
-			Columns: ec2Columns,
+			Columns: cols,
 		}),
+		columns: make([]ColumnDef, len(defaultEC2Columns)),
 	}
+	copy(v.columns, defaultEC2Columns)
+
 	shortcuts := v.Shortcuts()
 	if len(shortcuts) == 0 {
 		t.Error("expected shortcuts")
 	}
-	// Should have terminate(Del), reboot(r), stop(x), start(a), sort-by(s), sort-dir(d), refresh(R), multi-select(S)
+	// Should have power mgmt(Del), sort-by(s), sort-dir(d), refresh(R), multi-select(m), columns(o)
 	keys := make(map[string]bool)
 	for _, s := range shortcuts {
 		keys[s.Key] = true
 	}
-	expectedKeys := []string{"Del", "r", "x", "a", "s", "d", "R", "S"}
+	expectedKeys := []string{"Del", "s", "d", "R", "m", "o"}
 	for _, k := range expectedKeys {
 		if !keys[k] {
 			t.Errorf("expected shortcut key '%s'", k)

@@ -15,7 +15,8 @@ import (
 // ServiceEntry represents a navigable AWS service or sub-resource.
 type ServiceEntry struct {
 	Name        string
-	Command     string
+	Command     string          // The command for this entry (e.g., "ec2/instances")
+	Default     string          // For parent entries: the default child command (e.g., "ec2/instances")
 	Description string
 	Status      string          // "supported", "planned"
 	Children    []*ServiceEntry // nil = leaf node
@@ -81,13 +82,13 @@ func NewView(navigator Navigator) *View {
 func buildServiceTree() []*ServiceEntry {
 	return []*ServiceEntry{
 		{
-			Name: "EC2", Command: "ec2", Description: "Elastic Compute Cloud", Status: "supported",
+			Name: "EC2", Command: "ec2", Default: "ec2/instances", Description: "Elastic Compute Cloud", Status: "supported",
 			Children: []*ServiceEntry{
 				// Instances section
-				{Name: "Instances", Command: "ec2", Description: "Virtual Servers", Status: "supported"},
-				{Name: "Instance Types", Command: "ec2/instance-types", Description: "Available Instance Types", Status: "planned"},
-				{Name: "Launch Templates", Command: "ec2/launch-templates", Description: "Instance Launch Templates", Status: "planned"},
-				{Name: "Spot Requests", Command: "ec2/spot", Description: "Spot Instance Requests", Status: "planned"},
+				{Name: "Instances", Command: "ec2/instances", Description: "Virtual Servers", Status: "supported"},
+				{Name: "Instance Types", Command: "ec2/instance-types", Description: "Available Instance Types", Status: "supported"},
+				{Name: "Launch Templates", Command: "ec2/launch-templates", Description: "Instance Launch Templates", Status: "supported"},
+				{Name: "Spot Requests", Command: "ec2/spot", Description: "Spot Instance Requests", Status: "supported"},
 				{Name: "Reserved Instances", Command: "ec2/reserved", Description: "Reserved Instance Purchases", Status: "planned"},
 				{Name: "Dedicated Hosts", Command: "ec2/dedicated", Description: "Dedicated Physical Servers", Status: "planned"},
 				{Name: "Capacity Reservations", Command: "ec2/capacity", Description: "On-Demand Capacity", Status: "planned"},
@@ -99,38 +100,40 @@ func buildServiceTree() []*ServiceEntry {
 				{Name: "Snapshots", Command: "ec2/snapshots", Description: "EBS Snapshots", Status: "planned"},
 				{Name: "Lifecycle Manager", Command: "ec2/lifecycle", Description: "EBS Lifecycle Policies", Status: "planned"},
 				// Network & Security section
-				{Name: "Security Groups", Command: "sg", Description: "Firewall Rules", Status: "supported"},
+				{Name: "Security Groups", Command: "ec2/sg", Description: "Firewall Rules", Status: "supported"},
 				{Name: "Elastic IPs", Command: "ec2/eip", Description: "Static Public IPs", Status: "planned"},
 				{Name: "Placement Groups", Command: "ec2/placement", Description: "Instance Placement", Status: "planned"},
 				{Name: "Key Pairs", Command: "ec2/keypairs", Description: "SSH Key Pairs", Status: "planned"},
 				{Name: "Network Interfaces", Command: "ec2/eni", Description: "Elastic Network Interfaces", Status: "planned"},
+				// Load Balancing (nested under EC2)
+				{
+					Name: "Load Balancing", Command: "ec2/elb", Default: "ec2/elb/lb", Description: "Elastic Load Balancing", Status: "planned",
+					Children: []*ServiceEntry{
+						{Name: "Load Balancers", Command: "ec2/elb/lb", Description: "ALB / NLB / CLB", Status: "planned"},
+						{Name: "Target Groups", Command: "ec2/elb/tg", Description: "Target Groups", Status: "planned"},
+						{Name: "Trust Stores", Command: "ec2/elb/trust", Description: "mTLS Trust Stores", Status: "planned"},
+					},
+				},
+				// Auto Scaling (nested under EC2)
+				{
+					Name: "Auto Scaling", Command: "ec2/asg", Default: "ec2/asg/groups", Description: "Auto Scaling Groups", Status: "planned",
+					Children: []*ServiceEntry{
+						{Name: "Auto Scaling Groups", Command: "ec2/asg/groups", Description: "Scaling Groups", Status: "planned"},
+						{Name: "Launch Configurations", Command: "ec2/asg/launch-config", Description: "Legacy Launch Configs", Status: "planned"},
+					},
+				},
 			},
 		},
 		{
-			Name: "VPC", Command: "vpc", Description: "Virtual Private Cloud", Status: "supported",
+			Name: "VPC", Command: "vpc", Default: "vpc/vpcs", Description: "Virtual Private Cloud", Status: "supported",
 			Children: []*ServiceEntry{
-				{Name: "VPCs", Command: "vpc", Description: "Virtual Private Clouds", Status: "supported"},
-				{Name: "Subnets", Command: "subnet", Description: "Network Segments", Status: "supported"},
+				{Name: "VPCs", Command: "vpc/vpcs", Description: "Virtual Private Clouds", Status: "supported"},
+				{Name: "Subnets", Command: "vpc/subnets", Description: "Network Segments", Status: "supported"},
 				{Name: "Route Tables", Command: "vpc/routes", Description: "Routing Configuration", Status: "planned"},
 				{Name: "Internet Gateways", Command: "vpc/igw", Description: "Internet Access", Status: "planned"},
 				{Name: "NAT Gateways", Command: "vpc/nat", Description: "NAT for Private Subnets", Status: "planned"},
 				{Name: "Peering Connections", Command: "vpc/peering", Description: "VPC Peering", Status: "planned"},
 				{Name: "Endpoints", Command: "vpc/endpoints", Description: "VPC Endpoints", Status: "planned"},
-			},
-		},
-		{
-			Name: "Load Balancing", Command: "elb", Description: "Elastic Load Balancing", Status: "planned",
-			Children: []*ServiceEntry{
-				{Name: "Load Balancers", Command: "elb", Description: "ALB / NLB / CLB", Status: "planned"},
-				{Name: "Target Groups", Command: "elb/tg", Description: "Target Groups", Status: "planned"},
-				{Name: "Trust Stores", Command: "elb/trust", Description: "mTLS Trust Stores", Status: "planned"},
-			},
-		},
-		{
-			Name: "Auto Scaling", Command: "asg", Description: "Auto Scaling Groups", Status: "planned",
-			Children: []*ServiceEntry{
-				{Name: "Auto Scaling Groups", Command: "asg", Description: "Scaling Groups", Status: "planned"},
-				{Name: "Launch Configurations", Command: "asg/launch-config", Description: "Legacy Launch Configs", Status: "planned"},
 			},
 		},
 		{Name: "EKS", Command: "eks", Description: "Elastic Kubernetes Service", Status: "supported"},
@@ -189,20 +192,8 @@ func (v *View) render() {
 	v.table.Clear()
 
 	for row, svc := range v.visible {
-		// Expansion indicator
-		var indicator string
-		if svc.HasChildren() {
-			if svc.Expanded {
-				indicator = "▼"
-			} else {
-				indicator = "▶"
-			}
-		} else {
-			indicator = " "
-		}
-
-		// Indentation
-		indent := strings.Repeat("  ", svc.depth)
+		// Build tree prefix for arbitrary depth
+		prefix := v.buildTreePrefix(svc)
 
 		// Status indicator
 		statusIcon := "✔"
@@ -216,43 +207,44 @@ func (v *View) render() {
 		nameColor := tcell.ColorWhite
 		cmdColor := tcell.ColorDodgerBlue
 		descColor := tcell.ColorLightGray
+		prefixColor := tcell.ColorDarkGray
 		if svc.Status == "planned" {
 			nameColor = tcell.ColorGray
 			cmdColor = tcell.ColorDarkGray
 			descColor = tcell.ColorDarkGray
 		}
-
-		// Tree indicator column
-		indicatorColor := tcell.ColorYellow
-		if svc.Status == "planned" {
-			indicatorColor = tcell.ColorDarkGray
+		// Highlight expandable nodes
+		if svc.HasChildren() {
+			prefixColor = tcell.ColorYellow
 		}
-		v.table.SetCell(row, 0, tview.NewTableCell(indent+indicator).
-			SetTextColor(indicatorColor).
+
+		// Tree prefix column
+		v.table.SetCell(row, 0, tview.NewTableCell(prefix).
+			SetTextColor(prefixColor).
 			SetSelectable(true).
 			SetExpansion(0))
 
 		// Status column
-		v.table.SetCell(row, 1, tview.NewTableCell(statusIcon).
+		v.table.SetCell(row, 1, tview.NewTableCell(statusIcon+" ").
 			SetTextColor(statusColor).
 			SetSelectable(true).
 			SetExpansion(0))
 
 		// Service name
-		v.table.SetCell(row, 2, tview.NewTableCell(fmt.Sprintf(" %-22s", svc.Name)).
+		v.table.SetCell(row, 2, tview.NewTableCell(fmt.Sprintf("%-24s", svc.Name)).
 			SetTextColor(nameColor).
 			SetSelectable(true).
 			SetExpansion(0))
 
 		// Command shortcut
 		cmdText := fmt.Sprintf(":%s", svc.Command)
-		v.table.SetCell(row, 3, tview.NewTableCell(fmt.Sprintf(" %-20s", cmdText)).
+		v.table.SetCell(row, 3, tview.NewTableCell(fmt.Sprintf("%-28s", cmdText)).
 			SetTextColor(cmdColor).
 			SetSelectable(true).
 			SetExpansion(0))
 
 		// Description
-		v.table.SetCell(row, 4, tview.NewTableCell(" "+svc.Description).
+		v.table.SetCell(row, 4, tview.NewTableCell(svc.Description).
 			SetTextColor(descColor).
 			SetSelectable(true).
 			SetExpansion(1))
@@ -266,6 +258,69 @@ func (v *View) render() {
 		v.selected = 0
 	}
 	v.table.Select(v.selected, 0)
+}
+
+// buildTreePrefix constructs the tree drawing prefix for a node at any depth.
+// Handles arbitrary nesting with proper continuation lines and expand indicators.
+func (v *View) buildTreePrefix(svc *ServiceEntry) string {
+	if svc.depth == 0 {
+		// Top-level: just show expand indicator
+		if svc.HasChildren() {
+			if svc.Expanded {
+				return "▼ "
+			}
+			return "▶ "
+		}
+		return "  "
+	}
+
+	// Build continuation lines by walking up the ancestor chain
+	// We need to know for each ancestor level whether to draw │ or space
+	continuations := make([]string, svc.depth-1)
+	ancestor := svc.parent
+	for i := svc.depth - 2; i >= 0; i-- {
+		if ancestor != nil && !v.isLastChild(ancestor) {
+			continuations[i] = "│ "
+		} else {
+			continuations[i] = "  "
+		}
+		if ancestor != nil {
+			ancestor = ancestor.parent
+		}
+	}
+
+	// Build the prefix: continuations + branch + expand indicator
+	var prefix strings.Builder
+	for _, cont := range continuations {
+		prefix.WriteString(cont)
+	}
+
+	// Branch character
+	if v.isLastChild(svc) {
+		prefix.WriteString("└─")
+	} else {
+		prefix.WriteString("├─")
+	}
+
+	// Expand indicator for nested parents
+	if svc.HasChildren() {
+		if svc.Expanded {
+			prefix.WriteString("▼")
+		} else {
+			prefix.WriteString("▶")
+		}
+	}
+
+	return prefix.String()
+}
+
+// isLastChild returns true if this entry is the last child of its parent.
+func (v *View) isLastChild(svc *ServiceEntry) bool {
+	if svc.parent == nil {
+		return false
+	}
+	children := svc.parent.Children
+	return len(children) > 0 && children[len(children)-1] == svc
 }
 
 // handleInput processes keyboard events.
@@ -310,11 +365,16 @@ func (v *View) handleInput(event *tcell.EventKey) *tcell.EventKey {
 		}
 	case tcell.KeyEnter:
 		if svc.HasChildren() {
-			// Toggle expansion
-			svc.Expanded = !svc.Expanded
-			v.selected = row
-			v.flatten()
-			v.render()
+			// If parent has a default, navigate to it
+			if svc.Default != "" && svc.Status == "supported" {
+				v.navigator.Navigate(navigation.Route{Resource: svc.Default})
+			} else {
+				// Toggle expansion
+				svc.Expanded = !svc.Expanded
+				v.selected = row
+				v.flatten()
+				v.render()
+			}
 		} else if svc.Status == "supported" {
 			v.navigator.Navigate(navigation.Route{Resource: svc.Command})
 		} else {

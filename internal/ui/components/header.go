@@ -14,8 +14,10 @@ const HeaderHeight = 4
 
 // Shortcut represents a keyboard shortcut displayed in the header.
 type Shortcut struct {
-	Key   string
-	Label string
+	Key      string
+	Label    string
+	Standard bool // if true, rendered on bottom line with other standard shortcuts
+	Disabled bool // if true, greyed out (not currently applicable)
 }
 
 // Header is the top bar showing context info (left) and shortcuts (right).
@@ -117,51 +119,71 @@ func (h *Header) renderInfo() {
 	h.infoPane.SetText(b.String())
 }
 
-// renderShortcuts draws the right shortcuts pane as a compact table.
+// renderShortcuts draws the right shortcuts pane.
+// Service-specific shortcuts in columns at top, standard shortcuts on bottom line.
 func (h *Header) renderShortcuts() {
 	if len(h.shortcutList) == 0 {
 		h.shortcuts.SetText("")
 		return
 	}
 
-	// Lay shortcuts out in 2 columns to fill the 4 available lines.
-	rows := HeaderHeight
+	// Separate service-specific from standard shortcuts
+	var serviceShortcuts, standardShortcuts []Shortcut
+	for _, sc := range h.shortcutList {
+		if sc.Standard {
+			standardShortcuts = append(standardShortcuts, sc)
+		} else {
+			serviceShortcuts = append(serviceShortcuts, sc)
+		}
+	}
+
+	// Layout: 3 rows for service shortcuts (2 columns), 1 row for standard
+	serviceRows := HeaderHeight - 1 // 3 rows for service
 	cols := 2
 
-	// Build cell grid: fill column-first.
-	total := len(h.shortcutList)
-	cells := make([]string, rows*cols)
+	var b strings.Builder
+
+	// Render service shortcuts in 2-column grid
+	cells := make([]string, serviceRows*cols)
 	for i := range cells {
 		cells[i] = ""
 	}
-	for i, sc := range h.shortcutList {
-		col := i / rows
-		row := i % rows
+	for i, sc := range serviceShortcuts {
+		col := i / serviceRows
+		row := i % serviceRows
 		if col >= cols {
 			break
 		}
-		cells[row*cols+col] = fmt.Sprintf("[gold]<%s>[lightgray] %s", sc.Key, sc.Label)
-	}
-
-	// If there are more shortcuts than fit in 2 columns, add extras to last row.
-	if total > rows*cols {
-		var extra []string
-		for i := rows * cols; i < total; i++ {
-			extra = append(extra, fmt.Sprintf("[gold]<%s>[lightgray] %s", h.shortcutList[i].Key, h.shortcutList[i].Label))
+		if sc.Disabled {
+			cells[row*cols+col] = fmt.Sprintf("[gray]<%s> %s", sc.Key, sc.Label)
+		} else {
+			cells[row*cols+col] = fmt.Sprintf("[gold]<%s>[lightgray] %s", sc.Key, sc.Label)
 		}
-		cells[(rows-1)*cols+cols-1] += " " + strings.Join(extra, " ")
 	}
 
-	// Render rows with fixed-width columns.
-	var b strings.Builder
-	for row := 0; row < rows; row++ {
+	for row := 0; row < serviceRows; row++ {
 		if row > 0 {
 			b.WriteString("\n")
 		}
 		for col := 0; col < cols; col++ {
 			cell := cells[row*cols+col]
 			if cell != "" {
-				b.WriteString(fmt.Sprintf(" %-24s", cell))
+				b.WriteString(fmt.Sprintf(" %-28s", cell))
+			}
+		}
+	}
+
+	// Render standard shortcuts on bottom line (orange, or grey if disabled)
+	if len(standardShortcuts) > 0 {
+		b.WriteString("\n ")
+		for i, sc := range standardShortcuts {
+			if i > 0 {
+				b.WriteString(" ")
+			}
+			if sc.Disabled {
+				b.WriteString(fmt.Sprintf("[gray]<%s> %s", sc.Key, sc.Label))
+			} else {
+				b.WriteString(fmt.Sprintf("[orange]<%s>[lightgray] %s", sc.Key, sc.Label))
 			}
 		}
 	}

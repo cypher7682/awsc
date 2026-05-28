@@ -461,6 +461,16 @@ func (a *App) navigate(route navigation.Route) {
 			// Also check cached dynamic views
 			view, ok = a.views[viewName+":"+route.ResourceID]
 			if !ok {
+				// Try to resolve via command registry (e.g., "ec2/instances" -> "ec2")
+				resolved, found := a.commands.Resolve(viewName)
+				if found && resolved.Resource != viewName {
+					// Carry over ResourceID if not set in resolved route
+					if route.ResourceID != "" && resolved.ResourceID == "" {
+						resolved.ResourceID = route.ResourceID
+					}
+					a.navigate(resolved)
+					return
+				}
 				a.omnibox.SetStatus(fmt.Sprintf("[red]Unknown resource: %s", viewName))
 				return
 			}

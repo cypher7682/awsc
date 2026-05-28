@@ -4,6 +4,7 @@ package ec2view
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -31,21 +32,37 @@ type Navigator interface {
 	RefreshShortcuts()
 }
 
-// ec2Columns defines the column layout for the EC2 table.
-var ec2Columns = []components.Column{
-	{Title: "NAME", Field: "name", Expansion: 2},
-	{Title: "INSTANCE ID", Field: "instance_id", Expansion: 1},
-	{Title: "STATE", Field: "state", Expansion: 1},
-	{Title: "TYPE", Field: "type", Expansion: 1},
-	{Title: "PRIVATE IP", Field: "private_ip", Expansion: 1},
-	{Title: "PUBLIC IP", Field: "public_ip", Expansion: 1},
-	{Title: "AZ", Field: "az", Expansion: 1},
-	{Title: "KEY", Field: "key", Expansion: 1},
+// ColumnDef defines a column that can be shown/hidden.
+type ColumnDef struct {
+	Title     string
+	Field     string
+	Expansion int
+	Enabled   bool   // currently visible
+	IsTag     bool   // true if this is a tag column
+	TagKey    string // the tag key if IsTag
+}
+
+// Default columns for EC2 view.
+var defaultEC2Columns = []ColumnDef{
+	{Title: "NAME", Field: "name", Expansion: 2, Enabled: true},
+	{Title: "INSTANCE ID", Field: "instance_id", Expansion: 1, Enabled: true},
+	{Title: "STATE", Field: "state", Expansion: 1, Enabled: true},
+	{Title: "TYPE", Field: "type", Expansion: 1, Enabled: true},
+	{Title: "PRIVATE IP", Field: "private_ip", Expansion: 1, Enabled: true},
+	{Title: "PUBLIC IP", Field: "public_ip", Expansion: 1, Enabled: true},
+	{Title: "AZ", Field: "az", Expansion: 1, Enabled: true},
+	{Title: "KEY", Field: "key", Expansion: 1, Enabled: true},
+	// Additional columns (hidden by default)
+	{Title: "VPC ID", Field: "vpc_id", Expansion: 1, Enabled: false},
+	{Title: "SUBNET ID", Field: "subnet_id", Expansion: 1, Enabled: false},
+	{Title: "AMI ID", Field: "ami_id", Expansion: 1, Enabled: false},
+	{Title: "PLATFORM", Field: "platform", Expansion: 1, Enabled: false},
+	{Title: "LAUNCH TIME", Field: "launch_time", Expansion: 1, Enabled: false},
+	{Title: "IAM ROLE", Field: "iam_role", Expansion: 1, Enabled: false},
 }
 
 // ListView displays a list of EC2 instances.
 type ListView struct {
-	st        *components.SortableTable
 	navigator Navigator
 
 	mu        sync.RWMutex
@@ -53,20 +70,33 @@ type ListView struct {
 	filtered  []ec2.Instance
 	filter    string
 
-	// Multi-select split view
-	layout      *tview.Flex
-	selectPanel *tview.TextView
+	// Column configuration
+	columns    []ColumnDef
+	tagColumns []ColumnDef // discovered tag columns
+
+	// UI components
+	st           *components.SortableTable
+	layout       *tview.Flex
+	selectPanel  *tview.TextView
+	picker       *components.Picker
+	pickerActive bool
+
+	// Column picker state
+	columnPickerActive bool
+	columnList         *tview.List
 }
 
 // NewListView creates a new EC2 list view.
 func NewListView(navigator Navigator) *ListView {
 	v := &ListView{
 		navigator: navigator,
+		columns:   make([]ColumnDef, len(defaultEC2Columns)),
 	}
+	copy(v.columns, defaultEC2Columns)
 
 	v.st = components.NewSortableTable(components.SortableTableConfig{
 		Title:    "EC2 Instances",
-		Columns:  ec2Columns,
+		Columns:  v.activeColumns(),
 		OnStatus: navigator.SetStatus,
 	})
 	v.st.SetExtraInput(v.handleInput)
@@ -82,7 +112,7 @@ func NewListView(navigator Navigator) *ListView {
 
 	v.st.SetOnSelectionChanged(v.onMultiSelectChanged)
 
-	// Layout starts as table-only; split added when select mode activates
+	// Layout starts as table-only
 	v.layout = tview.NewFlex().SetDirection(tview.FlexRow)
 	v.layout.AddItem(v.st.Table, 0, 1, true)
 
@@ -109,6 +139,7 @@ func (v *ListView) Refresh(ctx context.Context) error {
 
 	v.mu.Lock()
 	v.instances = instances
+	v.discoverTagColumns()
 	v.applyFilter()
 	v.mu.Unlock()
 
@@ -116,29 +147,94 @@ func (v *ListView) Refresh(ctx context.Context) error {
 	return nil
 }
 
+// discoverTagColumns finds all unique tag keys across instances.
+// Must be called with lock held.
+func (v *ListView) discoverTagColumns() {
+	tagKeys := make(map[string]bool)
+	for _, inst := range v.instances {
+		for key := range inst.Tags {
+			if key != "Name" { // Name is already a default column
+				tagKeys[key] = true
+			}
+		}
+	}
+
+	// Convert to sorted slice
+	var keys []string
+	for k := range tagKeys {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	// Build tag columns (all disabled by default)
+	v.tagColumns = nil
+	for _, key := range keys {
+		v.tagColumns = append(v.tagColumns, ColumnDef{
+			Title:     "TAG:" + key,
+			Field:     "tag:" + key,
+			Expansion: 1,
+			Enabled:   false,
+			IsTag:     true,
+			TagKey:    key,
+		})
+	}
+}
+
+// activeColumns returns the currently enabled columns as components.Column slice.
+func (v *ListView) activeColumns() []components.Column {
+	var cols []components.Column
+	for _, c := range v.columns {
+		if c.Enabled {
+			cols = append(cols, components.Column{
+				Title:     c.Title,
+				Field:     c.Field,
+				Expansion: c.Expansion,
+			})
+		}
+	}
+	for _, c := range v.tagColumns {
+		if c.Enabled {
+			cols = append(cols, components.Column{
+				Title:     c.Title,
+				Field:     c.Field,
+				Expansion: c.Expansion,
+			})
+		}
+	}
+	return cols
+}
+
 // Shortcuts returns EC2-specific shortcuts.
+// Service-specific at top, standard controls at bottom (marked Standard: true).
 func (v *ListView) Shortcuts() []components.Shortcut {
-	sc := []components.Shortcut{
+	// Service-specific shortcuts (top section)
+	serviceShortcuts := []components.Shortcut{
 		{Key: "Enter", Label: "details"},
 		{Key: "c", Label: "connect"},
-		{Key: "S", Label: "multi-select"},
-		{Key: "Del", Label: "terminate"},
-		{Key: "r", Label: "reboot"},
-		{Key: "x", Label: "stop"},
-		{Key: "a", Label: "start"},
-		{Key: "s", Label: "sort-by"},
-		{Key: "d", Label: "sort-dir"},
-		{Key: "/", Label: "filter"},
+		{Key: "Del", Label: "power mgmt"},
 		{Key: "R", Label: "refresh"},
-		{Key: "Esc", Label: "back"},
 	}
+
+	// Standard shortcuts (bottom line, greyed out)
+	standardShortcuts := []components.Shortcut{
+		{Key: "m", Label: "multi-select", Standard: true},
+		{Key: "o", Label: "columns", Standard: true},
+		{Key: "s", Label: "sort", Standard: true},
+		{Key: "d", Label: "dir", Standard: true},
+		{Key: "/", Label: "filter", Standard: true},
+		{Key: "Esc", Label: "back", Standard: true},
+	}
+
 	if v.st.SelectMode() {
-		sc = append([]components.Shortcut{
-			{Key: "Space", Label: "toggle"},
-			{Key: "S", Label: "exit select"},
-		}, sc[2:]...) // replace Enter/S with Space/S at front
+		serviceShortcuts = []components.Shortcut{
+			{Key: "Space", Label: "toggle select"},
+			{Key: "Del", Label: "power mgmt"},
+			{Key: "R", Label: "refresh"},
+		}
+		standardShortcuts[0] = components.Shortcut{Key: "m", Label: "exit select", Standard: true}
 	}
-	return sc
+
+	return append(serviceShortcuts, standardShortcuts...)
 }
 
 // FilterFields returns available filter fields for EC2.
@@ -243,51 +339,49 @@ func (v *ListView) matchesFilter(inst ec2.Instance, filter string) bool {
 	}
 }
 
-// rebuildRows converts filtered instances into table rows and applies sort.
+// rebuildRows converts filtered instances into table rows.
 func (v *ListView) rebuildRows() {
 	v.mu.RLock()
 	filtered := make([]ec2.Instance, len(v.filtered))
 	copy(filtered, v.filtered)
 	total := len(v.instances)
 	filter := v.filter
+	activeCols := v.activeColumns()
 	v.mu.RUnlock()
 
 	rows := make([]components.Row, len(filtered))
 	for i, inst := range filtered {
-		name := inst.Name
-		if name == "" {
-			name = "[gray]-"
+		cells := make([]string, len(activeCols))
+		colors := make([]tcell.Color, len(activeCols))
+
+		for j, col := range activeCols {
+			cells[j], colors[j] = v.getCellValue(inst, col.Field)
 		}
+
 		rows[i] = components.Row{
-			ID: inst.InstanceID,
-			Cells: []string{
-				name,
-				inst.InstanceID,
-				inst.State,
-				inst.Type,
-				inst.PrivateIP,
-				orDash(inst.PublicIP),
-				inst.AZ,
-				orDash(inst.KeyName),
-			},
-			Colors: []tcell.Color{
-				tcell.ColorWhite,
-				tcell.ColorLightGray,
-				stateColor(inst.State),
-				tcell.ColorLightGray,
-				tcell.ColorWhite,
-				tcell.ColorLightGray,
-				tcell.ColorLightGray,
-				tcell.ColorLightGray,
-			},
+			ID:     inst.InstanceID,
+			Cells:  cells,
+			Colors: colors,
 		}
 	}
 
-	// Set rows and configure sort - SetSortKeyFn is retained for s/d re-sorting
+	// Rebuild table with current columns
+	v.st = components.NewSortableTable(components.SortableTableConfig{
+		Title:    "EC2 Instances",
+		Columns:  activeCols,
+		OnStatus: v.navigator.SetStatus,
+	})
+	v.st.SetExtraInput(v.handleInput)
+	v.st.SetSelectedFunc(v.onSelect)
+	v.st.SetOnSelectionChanged(v.onMultiSelectChanged)
+
 	v.st.SetRows(rows)
 	v.st.SetSortKeyFn(func(row components.Row, field string) string {
-		return ec2SortKey(row, field)
+		return v.sortKey(row, field, activeCols)
 	})
+
+	// Rebuild layout
+	v.rebuildLayout()
 
 	// Update title with filter info
 	if filter != "" {
@@ -295,159 +389,85 @@ func (v *ListView) rebuildRows() {
 	}
 }
 
-// ec2SortKey extracts a sort key from a Row for a given column field.
-func ec2SortKey(row components.Row, col string) string {
-	idx := -1
-	for i, c := range ec2Columns {
-		if c.Field == col {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 || idx >= len(row.Cells) {
-		return ""
-	}
-	return strings.ToLower(row.Cells[idx])
-}
-
-// handleInput processes view-specific key events (beyond sort).
-func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
-	// S (capital) toggles multi-select mode
-	if event.Rune() == 'S' {
-		v.toggleSelectMode()
-		return nil
-	}
-
-	// Delete key = terminate
-	if event.Key() == tcell.KeyDelete {
-		idx := v.st.GetSelectedIndex()
-		if idx < 0 {
-			return event
-		}
-		v.mu.RLock()
-		if idx >= len(v.filtered) {
-			v.mu.RUnlock()
-			return event
-		}
-		inst := v.filtered[idx]
-		v.mu.RUnlock()
-
+// getCellValue returns the cell text and color for a given field.
+func (v *ListView) getCellValue(inst ec2.Instance, field string) (string, tcell.Color) {
+	switch field {
+	case "name":
 		name := inst.Name
 		if name == "" {
-			name = inst.InstanceID
+			return "[gray]-", tcell.ColorGray
 		}
-		instanceID := inst.InstanceID
-		v.navigator.ShowConfirm(fmt.Sprintf("Terminate %s?", name), func() {
-			v.navigator.SetStatus(fmt.Sprintf("[yellow]Terminating %s...", instanceID))
-			go func() {
-				err := v.navigator.EC2Service().TerminateInstance(v.navigator.Context(), instanceID)
-				v.navigator.TviewApp().QueueUpdateDraw(func() {
-					if err != nil {
-						v.navigator.SetStatus(fmt.Sprintf("[red]Failed to terminate: %s", err.Error()))
-					} else {
-						v.navigator.SetStatus(fmt.Sprintf("[green]Terminated %s", instanceID))
-						v.Refresh(v.navigator.Context())
-					}
-				})
-			}()
-		})
+		return name, tcell.ColorWhite
+	case "instance_id":
+		return inst.InstanceID, tcell.ColorLightGray
+	case "state":
+		return inst.State, stateColor(inst.State)
+	case "type":
+		return inst.Type, tcell.ColorLightGray
+	case "private_ip":
+		return orDash(inst.PrivateIP), tcell.ColorWhite
+	case "public_ip":
+		return orDash(inst.PublicIP), tcell.ColorLightGray
+	case "az":
+		return inst.AZ, tcell.ColorLightGray
+	case "key":
+		return orDash(inst.KeyName), tcell.ColorLightGray
+	case "vpc_id":
+		return orDash(inst.VPCID), tcell.ColorLightGray
+	case "subnet_id":
+		return orDash(inst.SubnetID), tcell.ColorLightGray
+	case "ami_id":
+		return orDash(inst.AMI), tcell.ColorLightGray
+	case "platform":
+		return orDash(inst.Platform), tcell.ColorLightGray
+	case "launch_time":
+		return inst.LaunchTime.Format("2006-01-02 15:04"), tcell.ColorLightGray
+	case "iam_role":
+		return orDash(inst.IAMRole), tcell.ColorLightGray
+	default:
+		if strings.HasPrefix(field, "tag:") {
+			tagKey := strings.TrimPrefix(field, "tag:")
+			return orDash(inst.Tags[tagKey]), tcell.ColorLightGray
+		}
+		return "-", tcell.ColorGray
+	}
+}
+
+// sortKey extracts a sort key from a row.
+func (v *ListView) sortKey(row components.Row, field string, cols []components.Column) string {
+	for i, col := range cols {
+		if col.Field == field && i < len(row.Cells) {
+			return strings.ToLower(row.Cells[i])
+		}
+	}
+	return ""
+}
+
+// handleInput processes view-specific key events.
+func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
+	// If picker is active, route to picker
+	if v.pickerActive {
+		return v.handlePickerInput(event)
+	}
+
+	// If column picker is active, route to it
+	if v.columnPickerActive {
+		return v.handleColumnPickerInput(event)
+	}
+
+	switch event.Key() {
+	case tcell.KeyDelete:
+		v.showPowerPicker()
 		return nil
 	}
 
 	switch event.Rune() {
-	case 'r':
-		idx := v.st.GetSelectedIndex()
-		if idx < 0 {
-			return event
-		}
-		v.mu.RLock()
-		if idx >= len(v.filtered) {
-			v.mu.RUnlock()
-			return event
-		}
-		inst := v.filtered[idx]
-		v.mu.RUnlock()
-
-		name := inst.Name
-		if name == "" {
-			name = inst.InstanceID
-		}
-		instanceID := inst.InstanceID
-		v.navigator.ShowConfirm(fmt.Sprintf("Reboot %s?", name), func() {
-			v.navigator.SetStatus(fmt.Sprintf("[yellow]Rebooting %s...", instanceID))
-			go func() {
-				err := v.navigator.EC2Service().RebootInstance(v.navigator.Context(), instanceID)
-				v.navigator.TviewApp().QueueUpdateDraw(func() {
-					if err != nil {
-						v.navigator.SetStatus(fmt.Sprintf("[red]Failed to reboot: %s", err.Error()))
-					} else {
-						v.navigator.SetStatus(fmt.Sprintf("[green]Rebooting %s", instanceID))
-					}
-				})
-			}()
-		})
+	case 'm':
+		v.toggleSelectMode()
 		return nil
 
-	case 'x':
-		idx := v.st.GetSelectedIndex()
-		if idx < 0 {
-			return event
-		}
-		v.mu.RLock()
-		if idx >= len(v.filtered) {
-			v.mu.RUnlock()
-			return event
-		}
-		inst := v.filtered[idx]
-		v.mu.RUnlock()
-
-		name := inst.Name
-		if name == "" {
-			name = inst.InstanceID
-		}
-		instanceID := inst.InstanceID
-		v.navigator.ShowConfirm(fmt.Sprintf("Stop %s?", name), func() {
-			v.navigator.SetStatus(fmt.Sprintf("[yellow]Stopping %s...", instanceID))
-			go func() {
-				err := v.navigator.EC2Service().StopInstance(v.navigator.Context(), instanceID)
-				v.navigator.TviewApp().QueueUpdateDraw(func() {
-					if err != nil {
-						v.navigator.SetStatus(fmt.Sprintf("[red]Failed to stop: %s", err.Error()))
-					} else {
-						v.navigator.SetStatus(fmt.Sprintf("[green]Stopping %s", instanceID))
-						v.Refresh(v.navigator.Context())
-					}
-				})
-			}()
-		})
-		return nil
-
-	case 'a':
-		idx := v.st.GetSelectedIndex()
-		if idx < 0 {
-			return event
-		}
-		v.mu.RLock()
-		if idx >= len(v.filtered) {
-			v.mu.RUnlock()
-			return event
-		}
-		inst := v.filtered[idx]
-		v.mu.RUnlock()
-
-		instanceID := inst.InstanceID
-		v.navigator.SetStatus(fmt.Sprintf("[yellow]Starting %s...", instanceID))
-		go func() {
-			err := v.navigator.EC2Service().StartInstance(v.navigator.Context(), instanceID)
-			v.navigator.TviewApp().QueueUpdateDraw(func() {
-				if err != nil {
-					v.navigator.SetStatus(fmt.Sprintf("[red]Failed to start: %s", err.Error()))
-				} else {
-					v.navigator.SetStatus(fmt.Sprintf("[green]Starting %s", instanceID))
-					v.Refresh(v.navigator.Context())
-				}
-			})
-		}()
+	case 'o':
+		v.showColumnPicker()
 		return nil
 
 	case 'c':
@@ -462,7 +482,6 @@ func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 		}
 		inst := v.filtered[idx]
 		v.mu.RUnlock()
-
 		v.navigator.RunEC2ConnectCmd(inst.InstanceID)
 		return nil
 
@@ -482,25 +501,292 @@ func (v *ListView) handleInput(event *tcell.EventKey) *tcell.EventKey {
 	return event
 }
 
+// showPowerPicker displays the power management picker.
+func (v *ListView) showPowerPicker() {
+	// Get selected instances
+	var targets []ec2.Instance
+	var targetIDs []string
+
+	if v.st.SelectMode() && v.st.SelectedCount() > 0 {
+		targetIDs = v.st.SelectedIDs()
+		v.mu.RLock()
+		for _, id := range targetIDs {
+			for _, inst := range v.filtered {
+				if inst.InstanceID == id {
+					targets = append(targets, inst)
+					break
+				}
+			}
+		}
+		v.mu.RUnlock()
+	} else {
+		idx := v.st.GetSelectedIndex()
+		if idx < 0 {
+			return
+		}
+		v.mu.RLock()
+		if idx >= len(v.filtered) {
+			v.mu.RUnlock()
+			return
+		}
+		targets = []ec2.Instance{v.filtered[idx]}
+		targetIDs = []string{targets[0].InstanceID}
+		v.mu.RUnlock()
+	}
+
+	if len(targets) == 0 {
+		return
+	}
+
+	// Determine which options are applicable based on instance states
+	hasRunning := false
+	hasStopped := false
+	for _, inst := range targets {
+		if inst.State == "running" {
+			hasRunning = true
+		}
+		if inst.State == "stopped" {
+			hasStopped = true
+		}
+	}
+
+	title := "Power Management"
+	if len(targets) == 1 {
+		name := targets[0].Name
+		if name == "" {
+			name = targets[0].InstanceID
+		}
+		title = fmt.Sprintf("Power: %s", name)
+	} else {
+		title = fmt.Sprintf("Power: %d instances", len(targets))
+	}
+
+	options := []components.PickerOption{
+		{Key: "a", Label: "Start", Description: "Start stopped instances", Disabled: !hasStopped, Color: tcell.ColorGreen},
+		{Key: "x", Label: "Stop", Description: "Stop running instances", Disabled: !hasRunning, Color: tcell.ColorYellow},
+		{Key: "r", Label: "Reboot", Description: "Reboot running instances", Disabled: !hasRunning, Color: tcell.ColorYellow},
+		{Key: "t", Label: "Terminate", Description: "Terminate instances (with confirmation)", Color: tcell.ColorRed},
+		{Key: "f", Label: "Force Stop", Description: "Force stop (may cause data loss)", Disabled: !hasRunning, Color: tcell.ColorRed},
+	}
+
+	v.picker = components.NewPicker(title, options)
+	v.picker.SetOnSelect(func(opt components.PickerOption) {
+		v.pickerActive = false
+		v.rebuildLayout()
+		v.executePowerAction(opt.Key, targetIDs, targets)
+	})
+	v.picker.SetOnCancel(func() {
+		v.pickerActive = false
+		v.rebuildLayout()
+		v.navigator.SetStatus("[gray]Cancelled")
+	})
+	v.picker.Show()
+	v.pickerActive = true
+	v.rebuildLayout()
+}
+
+// executePowerAction performs the selected power action.
+func (v *ListView) executePowerAction(action string, ids []string, targets []ec2.Instance) {
+	ctx := v.navigator.Context()
+	svc := v.navigator.EC2Service()
+
+	var actionName string
+	var actionFn func(ctx context.Context, id string) error
+	var needsConfirm bool
+
+	switch action {
+	case "a": // Start
+		actionName = "Starting"
+		actionFn = svc.StartInstance
+	case "x": // Stop
+		actionName = "Stopping"
+		actionFn = svc.StopInstance
+		needsConfirm = true
+	case "r": // Reboot
+		actionName = "Rebooting"
+		actionFn = svc.RebootInstance
+		needsConfirm = true
+	case "t": // Terminate
+		actionName = "Terminating"
+		actionFn = svc.TerminateInstance
+		needsConfirm = true
+	case "f": // Force stop
+		actionName = "Force stopping"
+		actionFn = func(ctx context.Context, id string) error {
+			return svc.ForceStopInstance(ctx, id)
+		}
+		needsConfirm = true
+	default:
+		return
+	}
+
+	doAction := func() {
+		v.navigator.SetStatus(fmt.Sprintf("[yellow]%s %d instance(s)...", actionName, len(ids)))
+		go func() {
+			var errors []string
+			for _, id := range ids {
+				if err := actionFn(ctx, id); err != nil {
+					errors = append(errors, fmt.Sprintf("%s: %s", id, err.Error()))
+				}
+			}
+			v.navigator.TviewApp().QueueUpdateDraw(func() {
+				if len(errors) > 0 {
+					v.navigator.SetStatus(fmt.Sprintf("[red]%s failed for %d instance(s)", actionName, len(errors)))
+				} else {
+					v.navigator.SetStatus(fmt.Sprintf("[green]%s %d instance(s)", actionName, len(ids)))
+					v.Refresh(ctx)
+				}
+			})
+		}()
+	}
+
+	if needsConfirm {
+		var desc string
+		if len(targets) == 1 {
+			name := targets[0].Name
+			if name == "" {
+				name = targets[0].InstanceID
+			}
+			desc = name
+		} else {
+			desc = fmt.Sprintf("%d instances", len(targets))
+		}
+		v.navigator.ShowConfirm(fmt.Sprintf("%s %s?", actionName[:len(actionName)-3], desc), doAction)
+	} else {
+		doAction()
+	}
+}
+
+// handlePickerInput routes input to the power picker.
+func (v *ListView) handlePickerInput(event *tcell.EventKey) *tcell.EventKey {
+	if v.picker != nil {
+		handler := v.picker.InputHandler()
+		handler(event, nil)
+	}
+	return nil
+}
+
+// showColumnPicker displays the column configuration picker.
+func (v *ListView) showColumnPicker() {
+	v.columnList = tview.NewList()
+	v.columnList.SetBorder(true)
+	v.columnList.SetBorderColor(tcell.ColorDodgerBlue)
+	v.columnList.SetTitle(" Columns (Space=toggle, Enter=done) ")
+	v.columnList.SetHighlightFullLine(true)
+	v.columnList.ShowSecondaryText(false)
+
+	v.rebuildColumnList()
+
+	v.columnList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyEnter, tcell.KeyEscape:
+			v.columnPickerActive = false
+			v.rebuildRows()
+			v.navigator.RefreshShortcuts()
+			// Set focus back to the table
+			v.navigator.TviewApp().SetFocus(v.st.Table)
+			return nil
+		case tcell.KeyRune:
+			if event.Rune() == ' ' {
+				v.toggleColumnAt(v.columnList.GetCurrentItem())
+				return nil
+			}
+		}
+		return event
+	})
+
+	v.columnPickerActive = true
+	v.rebuildLayout()
+}
+
+// rebuildColumnList updates the column list items.
+func (v *ListView) rebuildColumnList() {
+	v.columnList.Clear()
+
+	// Standard columns
+	for i, col := range v.columns {
+		marker := "[ ]"
+		if col.Enabled {
+			marker = "[✓]"
+		}
+		idx := i // capture for closure
+		v.columnList.AddItem(fmt.Sprintf("%s %s", marker, col.Title), "", 0, func() {
+			v.toggleColumnAt(idx)
+		})
+	}
+
+	// Tag columns
+	for i, col := range v.tagColumns {
+		marker := "[ ]"
+		if col.Enabled {
+			marker = "[✓]"
+		}
+		idx := len(v.columns) + i
+		v.columnList.AddItem(fmt.Sprintf("%s %s", marker, col.Title), "", 0, func() {
+			v.toggleColumnAt(idx)
+		})
+	}
+}
+
+// toggleColumnAt toggles the column at the given list index.
+func (v *ListView) toggleColumnAt(idx int) {
+	// Save current position
+	currentIdx := v.columnList.GetCurrentItem()
+
+	if idx < len(v.columns) {
+		v.columns[idx].Enabled = !v.columns[idx].Enabled
+	} else {
+		tagIdx := idx - len(v.columns)
+		if tagIdx < len(v.tagColumns) {
+			v.tagColumns[tagIdx].Enabled = !v.tagColumns[tagIdx].Enabled
+		}
+	}
+	v.rebuildColumnList()
+
+	// Restore position
+	v.columnList.SetCurrentItem(currentIdx)
+}
+
+// handleColumnPickerInput routes input to the column picker.
+func (v *ListView) handleColumnPickerInput(event *tcell.EventKey) *tcell.EventKey {
+	if v.columnList != nil {
+		handler := v.columnList.InputHandler()
+		handler(event, nil)
+	}
+	return nil
+}
+
 // toggleSelectMode switches multi-select mode on/off.
 func (v *ListView) toggleSelectMode() {
 	newMode := !v.st.SelectMode()
 	v.st.SetSelectMode(newMode)
 
 	if newMode {
-		v.navigator.SetStatus("[yellow]Multi-select mode: Space to toggle, S to exit")
-		v.rebuildSplitLayout(true)
+		v.navigator.SetStatus("[yellow]Multi-select: Space=toggle, m=exit, Del=power mgmt")
 	} else {
 		v.st.ClearSelected()
 		v.navigator.SetStatus("[green]Multi-select mode off")
-		v.rebuildSplitLayout(false)
 	}
+	v.rebuildLayout()
+	v.navigator.RefreshShortcuts()
 }
 
-// rebuildSplitLayout reconfigures the layout flex for split/non-split mode.
-func (v *ListView) rebuildSplitLayout(split bool) {
+// rebuildLayout reconfigures the layout based on current state.
+func (v *ListView) rebuildLayout() {
 	v.layout.Clear()
-	if split {
+
+	if v.columnPickerActive && v.columnList != nil {
+		// Split: table left, column picker right
+		v.layout.SetDirection(tview.FlexColumn)
+		v.layout.AddItem(v.st.Table, 0, 2, true)
+		v.layout.AddItem(v.columnList, 40, 0, true)
+		return
+	}
+
+	v.layout.SetDirection(tview.FlexRow)
+
+	if v.st.SelectMode() {
+		// Split: table top, selection panel bottom
 		v.layout.AddItem(v.st.Table, 0, 2, true)
 		v.layout.AddItem(v.selectPanel, 0, 1, false)
 	} else {
@@ -541,6 +827,12 @@ func (v *ListView) onMultiSelectChanged(ids []string) {
 
 // onSelect handles Enter key on an instance row.
 func (v *ListView) onSelect(idx int, id string) {
+	// In select mode, Enter doesn't navigate
+	if v.st.SelectMode() {
+		v.st.ToggleSelected()
+		return
+	}
+
 	v.mu.RLock()
 	if idx >= len(v.filtered) {
 		v.mu.RUnlock()

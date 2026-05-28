@@ -82,6 +82,22 @@ func (m *mockEC2Client) DeleteTags(ctx context.Context, params *ec2.DeleteTagsIn
 	return &ec2.DeleteTagsOutput{}, nil
 }
 
+func (m *mockEC2Client) DescribeInstanceTypes(ctx context.Context, params *ec2.DescribeInstanceTypesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstanceTypesOutput, error) {
+	return &ec2.DescribeInstanceTypesOutput{}, nil
+}
+
+func (m *mockEC2Client) DescribeLaunchTemplates(ctx context.Context, params *ec2.DescribeLaunchTemplatesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeLaunchTemplatesOutput, error) {
+	return &ec2.DescribeLaunchTemplatesOutput{}, nil
+}
+
+func (m *mockEC2Client) DescribeLaunchTemplateVersions(ctx context.Context, params *ec2.DescribeLaunchTemplateVersionsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeLaunchTemplateVersionsOutput, error) {
+	return &ec2.DescribeLaunchTemplateVersionsOutput{}, nil
+}
+
+func (m *mockEC2Client) DescribeSpotInstanceRequests(ctx context.Context, params *ec2.DescribeSpotInstanceRequestsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeSpotInstanceRequestsOutput, error) {
+	return &ec2.DescribeSpotInstanceRequestsOutput{}, nil
+}
+
 func TestListInstancesRaw(t *testing.T) {
 	now := time.Now()
 	mock := &mockEC2Client{

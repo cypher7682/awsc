@@ -27,6 +27,7 @@ type Instance struct {
 	AZ               string
 	AMI              string
 	KeyName          string
+	IAMRole          string
 	Tags             map[string]string
 }
 
@@ -72,9 +73,135 @@ type Subnet struct {
 	Tags             map[string]string
 }
 
+// InstanceTypeInfo represents an EC2 instance type with its specifications.
+type InstanceTypeInfo struct {
+	Name               string   // e.g., "t3.micro"
+	FreeTierEligible   bool
+	VCPUs              int32
+	Architectures      []string // e.g., ["x86_64"], ["arm64"]
+	MemoryMiB          int64
+	StorageGB          int64    // 0 if EBS-only
+	StorageType        string   // "ssd", "hdd", "nvme", or ""
+	NetworkPerformance string   // e.g., "Up to 5 Gigabit"
+	CurrentGeneration  bool
+	BareMetal          bool
+	Hypervisor         string   // "xen", "nitro", or ""
+}
+
+// LaunchTemplate represents an EC2 launch template for the list view.
+type LaunchTemplate struct {
+	LaunchTemplateID   string
+	LaunchTemplateName string
+	DefaultVersion     int64
+	LatestVersion      int64
+	CreateTime         time.Time
+	CreatedBy          string
+	Tags               map[string]string
+}
+
+// LaunchTemplateDetail contains full launch template info including version data.
+type LaunchTemplateDetail struct {
+	LaunchTemplate
+	// Version data (from default version)
+	VersionDescription string
+	InstanceType       string
+	ImageID            string
+	KeyName            string
+	SecurityGroupIDs   []string
+	SecurityGroupNames []string
+	// Network interfaces
+	NetworkInterfaces []LTNetworkInterface
+	// Storage
+	BlockDeviceMappings []LTBlockDevice
+	// Placement
+	AvailabilityZone string
+	Tenancy          string
+	// IAM
+	IAMInstanceProfile string
+	// Monitoring
+	MonitoringEnabled bool
+	// Metadata
+	UserData            string
+	DisableAPIStop      bool
+	DisableAPITerminate bool
+	EBSOptimized        bool
+	// Tags for instances launched
+	TagSpecifications []LTTagSpec
+}
+
+// LTNetworkInterface represents a network interface in a launch template.
+type LTNetworkInterface struct {
+	DeviceIndex              int32
+	SubnetID                 string
+	AssociatePublicIPAddress bool
+	SecurityGroupIDs         []string
+	DeleteOnTermination      bool
+	Description              string
+}
+
+// LTBlockDevice represents a block device mapping in a launch template.
+type LTBlockDevice struct {
+	DeviceName          string
+	VolumeType          string
+	VolumeSize          int32
+	IOPS                int32
+	Throughput          int32
+	Encrypted           bool
+	DeleteOnTermination bool
+	SnapshotID          string
+}
+
+// LTTagSpec represents tag specifications for launched resources.
+type LTTagSpec struct {
+	ResourceType string
+	Tags         map[string]string
+}
+
+// SpotInstanceRequest represents an EC2 spot instance request.
+type SpotInstanceRequest struct {
+	RequestID        string
+	State            string // open, active, closed, cancelled, failed
+	StatusCode       string
+	StatusMessage    string
+	InstanceID       string // empty if not yet fulfilled
+	InstanceType     string
+	SpotPrice        string
+	CreateTime       time.Time
+	ValidFrom        time.Time
+	ValidUntil       time.Time
+	LaunchGroup      string
+	AvailabilityZone string
+	ProductDescription string
+	Type             string // one-time, persistent
+	Tags             map[string]string
+}
+
+// SpotInstanceRequestDetail contains full spot request info.
+type SpotInstanceRequestDetail struct {
+	SpotInstanceRequest
+	// Launch specification
+	ImageID            string
+	KeyName            string
+	SecurityGroupIDs   []string
+	SubnetID           string
+	IAMInstanceProfile string
+	UserData           string
+	EBSOptimized       bool
+	Monitoring         bool
+	// Block devices
+	BlockDeviceMappings []LTBlockDevice
+	// Fault info
+	FaultCode    string
+	FaultMessage string
+}
+
 // EC2API defines the interface for EC2 operations (for testability).
 type EC2API interface {
 	DescribeInstances(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
+	DescribeInstanceTypes(ctx context.Context, params *ec2.DescribeInstanceTypesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstanceTypesOutput, error)
+	DescribeLaunchTemplates(ctx context.Context, params *ec2.DescribeLaunchTemplatesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeLaunchTemplatesOutput, error)
+	DescribeLaunchTemplateVersions(ctx context.Context, params *ec2.DescribeLaunchTemplateVersionsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeLaunchTemplateVersionsOutput, error)
+	DescribeSpotInstanceRequests(ctx context.Context, params *ec2.DescribeSpotInstanceRequestsInput, optFns ...func(*ec2.Options)) (*ec2.DescribeSpotInstanceRequestsOutput, error)
 	TerminateInstances(ctx context.Context, params *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error)
 	RebootInstances(ctx context.Context, params *ec2.RebootInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RebootInstancesOutput, error)
 	StopInstances(ctx context.Context, params *ec2.StopInstancesInput, optFns ...func(*ec2.Options)) (*ec2.StopInstancesOutput, error)
@@ -216,6 +343,19 @@ func (s *Service) StopInstance(ctx context.Context, instanceID string) error {
 	return nil
 }
 
+// ForceStopInstance forcibly stops an EC2 instance (may cause data loss).
+func (s *Service) ForceStopInstance(ctx context.Context, instanceID string) error {
+	force := true
+	_, err := s.client.StopInstances(ctx, &ec2.StopInstancesInput{
+		InstanceIds: []string{instanceID},
+		Force:       &force,
+	})
+	if err != nil {
+		return fmt.Errorf("force stopping instance %s: %w", instanceID, err)
+	}
+	return nil
+}
+
 // StartInstance starts an EC2 instance.
 func (s *Service) StartInstance(ctx context.Context, instanceID string) error {
 	_, err := s.client.StartInstances(ctx, &ec2.StartInstancesInput{
@@ -282,6 +422,280 @@ func (s *Service) ListSubnets(ctx context.Context, vpcID string) ([]Subnet, erro
 		subnets = append(subnets, subnetFromAWS(sn))
 	}
 	return subnets, nil
+}
+
+// ListInstanceTypes returns all available EC2 instance types.
+func (s *Service) ListInstanceTypes(ctx context.Context) ([]InstanceTypeInfo, error) {
+	var instanceTypes []InstanceTypeInfo
+	var nextToken *string
+
+	for {
+		input := &ec2.DescribeInstanceTypesInput{
+			NextToken: nextToken,
+		}
+
+		output, err := s.client.DescribeInstanceTypes(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("describing instance types: %w", err)
+		}
+
+		for _, it := range output.InstanceTypes {
+			instanceTypes = append(instanceTypes, instanceTypeFromAWS(it))
+		}
+
+		if output.NextToken == nil {
+			break
+		}
+		nextToken = output.NextToken
+	}
+
+	return instanceTypes, nil
+}
+
+// ListLaunchTemplates returns all launch templates.
+func (s *Service) ListLaunchTemplates(ctx context.Context) ([]LaunchTemplate, error) {
+	var templates []LaunchTemplate
+	var nextToken *string
+
+	for {
+		input := &ec2.DescribeLaunchTemplatesInput{
+			NextToken: nextToken,
+		}
+
+		output, err := s.client.DescribeLaunchTemplates(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("describing launch templates: %w", err)
+		}
+
+		for _, lt := range output.LaunchTemplates {
+			templates = append(templates, launchTemplateFromAWS(lt))
+		}
+
+		if output.NextToken == nil {
+			break
+		}
+		nextToken = output.NextToken
+	}
+
+	return templates, nil
+}
+
+// GetLaunchTemplate returns a launch template with its default version details.
+func (s *Service) GetLaunchTemplate(ctx context.Context, templateID string) (*LaunchTemplateDetail, error) {
+	// First get the template itself
+	ltOutput, err := s.client.DescribeLaunchTemplates(ctx, &ec2.DescribeLaunchTemplatesInput{
+		LaunchTemplateIds: []string{templateID},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("describing launch template %s: %w", templateID, err)
+	}
+	if len(ltOutput.LaunchTemplates) == 0 {
+		return nil, fmt.Errorf("launch template %s not found", templateID)
+	}
+
+	lt := launchTemplateFromAWS(ltOutput.LaunchTemplates[0])
+
+	// Get the default version details
+	versOutput, err := s.client.DescribeLaunchTemplateVersions(ctx, &ec2.DescribeLaunchTemplateVersionsInput{
+		LaunchTemplateId: aws.String(templateID),
+		Versions:         []string{"$Default"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("describing launch template version: %w", err)
+	}
+
+	detail := &LaunchTemplateDetail{
+		LaunchTemplate: lt,
+	}
+
+	if len(versOutput.LaunchTemplateVersions) > 0 {
+		ver := versOutput.LaunchTemplateVersions[0]
+		detail.VersionDescription = aws.ToString(ver.VersionDescription)
+
+		if data := ver.LaunchTemplateData; data != nil {
+			detail.InstanceType = string(data.InstanceType)
+			detail.ImageID = aws.ToString(data.ImageId)
+			detail.KeyName = aws.ToString(data.KeyName)
+			detail.EBSOptimized = aws.ToBool(data.EbsOptimized)
+			detail.DisableAPITerminate = aws.ToBool(data.DisableApiTermination)
+			detail.DisableAPIStop = aws.ToBool(data.DisableApiStop)
+
+			// Security groups
+			for _, sg := range data.SecurityGroupIds {
+				detail.SecurityGroupIDs = append(detail.SecurityGroupIDs, sg)
+			}
+			for _, sg := range data.SecurityGroups {
+				detail.SecurityGroupNames = append(detail.SecurityGroupNames, sg)
+			}
+
+			// Placement
+			if data.Placement != nil {
+				detail.AvailabilityZone = aws.ToString(data.Placement.AvailabilityZone)
+				detail.Tenancy = string(data.Placement.Tenancy)
+			}
+
+			// IAM
+			if data.IamInstanceProfile != nil {
+				if data.IamInstanceProfile.Arn != nil {
+					detail.IAMInstanceProfile = aws.ToString(data.IamInstanceProfile.Arn)
+				} else if data.IamInstanceProfile.Name != nil {
+					detail.IAMInstanceProfile = aws.ToString(data.IamInstanceProfile.Name)
+				}
+			}
+
+			// Monitoring
+			if data.Monitoring != nil {
+				detail.MonitoringEnabled = aws.ToBool(data.Monitoring.Enabled)
+			}
+
+			// User data (base64)
+			detail.UserData = aws.ToString(data.UserData)
+
+			// Network interfaces
+			for _, ni := range data.NetworkInterfaces {
+				ltNI := LTNetworkInterface{
+					DeviceIndex:              aws.ToInt32(ni.DeviceIndex),
+					SubnetID:                 aws.ToString(ni.SubnetId),
+					AssociatePublicIPAddress: aws.ToBool(ni.AssociatePublicIpAddress),
+					DeleteOnTermination:      aws.ToBool(ni.DeleteOnTermination),
+					Description:              aws.ToString(ni.Description),
+				}
+				for _, sg := range ni.Groups {
+					ltNI.SecurityGroupIDs = append(ltNI.SecurityGroupIDs, sg)
+				}
+				detail.NetworkInterfaces = append(detail.NetworkInterfaces, ltNI)
+			}
+
+			// Block devices
+			for _, bd := range data.BlockDeviceMappings {
+				ltBD := LTBlockDevice{
+					DeviceName: aws.ToString(bd.DeviceName),
+				}
+				if bd.Ebs != nil {
+					ltBD.VolumeType = string(bd.Ebs.VolumeType)
+					ltBD.VolumeSize = aws.ToInt32(bd.Ebs.VolumeSize)
+					ltBD.IOPS = aws.ToInt32(bd.Ebs.Iops)
+					ltBD.Throughput = aws.ToInt32(bd.Ebs.Throughput)
+					ltBD.Encrypted = aws.ToBool(bd.Ebs.Encrypted)
+					ltBD.DeleteOnTermination = aws.ToBool(bd.Ebs.DeleteOnTermination)
+					ltBD.SnapshotID = aws.ToString(bd.Ebs.SnapshotId)
+				}
+				detail.BlockDeviceMappings = append(detail.BlockDeviceMappings, ltBD)
+			}
+
+			// Tag specifications
+			for _, ts := range data.TagSpecifications {
+				ltTS := LTTagSpec{
+					ResourceType: string(ts.ResourceType),
+					Tags:         make(map[string]string),
+				}
+				for _, tag := range ts.Tags {
+					ltTS.Tags[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
+				}
+				detail.TagSpecifications = append(detail.TagSpecifications, ltTS)
+			}
+		}
+	}
+
+	return detail, nil
+}
+
+// ListSpotInstanceRequests returns all spot instance requests.
+func (s *Service) ListSpotInstanceRequests(ctx context.Context) ([]SpotInstanceRequest, error) {
+	var requests []SpotInstanceRequest
+	var nextToken *string
+
+	for {
+		input := &ec2.DescribeSpotInstanceRequestsInput{
+			NextToken: nextToken,
+		}
+
+		output, err := s.client.DescribeSpotInstanceRequests(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("describing spot instance requests: %w", err)
+		}
+
+		for _, sir := range output.SpotInstanceRequests {
+			requests = append(requests, spotInstanceRequestFromAWS(sir))
+		}
+
+		if output.NextToken == nil {
+			break
+		}
+		nextToken = output.NextToken
+	}
+
+	return requests, nil
+}
+
+// GetSpotInstanceRequest returns a spot instance request with full details.
+func (s *Service) GetSpotInstanceRequest(ctx context.Context, requestID string) (*SpotInstanceRequestDetail, error) {
+	output, err := s.client.DescribeSpotInstanceRequests(ctx, &ec2.DescribeSpotInstanceRequestsInput{
+		SpotInstanceRequestIds: []string{requestID},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("describing spot instance request %s: %w", requestID, err)
+	}
+	if len(output.SpotInstanceRequests) == 0 {
+		return nil, fmt.Errorf("spot instance request %s not found", requestID)
+	}
+
+	sir := output.SpotInstanceRequests[0]
+	basic := spotInstanceRequestFromAWS(sir)
+
+	detail := &SpotInstanceRequestDetail{
+		SpotInstanceRequest: basic,
+	}
+
+	// Launch specification details
+	if spec := sir.LaunchSpecification; spec != nil {
+		detail.ImageID = aws.ToString(spec.ImageId)
+		detail.KeyName = aws.ToString(spec.KeyName)
+		detail.SubnetID = aws.ToString(spec.SubnetId)
+		detail.EBSOptimized = aws.ToBool(spec.EbsOptimized)
+
+		for _, sg := range spec.SecurityGroups {
+			detail.SecurityGroupIDs = append(detail.SecurityGroupIDs, aws.ToString(sg.GroupId))
+		}
+
+		if spec.IamInstanceProfile != nil {
+			if spec.IamInstanceProfile.Arn != nil {
+				detail.IAMInstanceProfile = aws.ToString(spec.IamInstanceProfile.Arn)
+			} else if spec.IamInstanceProfile.Name != nil {
+				detail.IAMInstanceProfile = aws.ToString(spec.IamInstanceProfile.Name)
+			}
+		}
+
+		if spec.Monitoring != nil {
+			detail.Monitoring = aws.ToBool(spec.Monitoring.Enabled)
+		}
+
+		detail.UserData = aws.ToString(spec.UserData)
+
+		// Block devices
+		for _, bd := range spec.BlockDeviceMappings {
+			ltBD := LTBlockDevice{
+				DeviceName: aws.ToString(bd.DeviceName),
+			}
+			if bd.Ebs != nil {
+				ltBD.VolumeType = string(bd.Ebs.VolumeType)
+				ltBD.VolumeSize = aws.ToInt32(bd.Ebs.VolumeSize)
+				ltBD.IOPS = aws.ToInt32(bd.Ebs.Iops)
+				ltBD.Encrypted = aws.ToBool(bd.Ebs.Encrypted)
+				ltBD.DeleteOnTermination = aws.ToBool(bd.Ebs.DeleteOnTermination)
+				ltBD.SnapshotID = aws.ToString(bd.Ebs.SnapshotId)
+			}
+			detail.BlockDeviceMappings = append(detail.BlockDeviceMappings, ltBD)
+		}
+	}
+
+	// Fault info
+	if sir.Fault != nil {
+		detail.FaultCode = aws.ToString(sir.Fault.Code)
+		detail.FaultMessage = aws.ToString(sir.Fault.Message)
+	}
+
+	return detail, nil
 }
 
 // AddIngressRule adds an ingress rule to a security group.
@@ -374,6 +788,10 @@ func instanceFromAWS(inst types.Instance) Instance {
 		if key == "Name" {
 			i.Name = value
 		}
+	}
+
+	if inst.IamInstanceProfile != nil {
+		i.IAMRole = aws.ToString(inst.IamInstanceProfile.Arn)
 	}
 
 	return i
@@ -495,4 +913,113 @@ func (s *Service) DeleteTag(ctx context.Context, resourceID, key string) error {
 		},
 	})
 	return err
+}
+
+// instanceTypeFromAWS converts an AWS InstanceTypeInfo to our internal representation.
+func instanceTypeFromAWS(it types.InstanceTypeInfo) InstanceTypeInfo {
+	info := InstanceTypeInfo{
+		Name:              string(it.InstanceType),
+		FreeTierEligible:  aws.ToBool(it.FreeTierEligible),
+		CurrentGeneration: aws.ToBool(it.CurrentGeneration),
+		BareMetal:         aws.ToBool(it.BareMetal),
+	}
+
+	// vCPUs
+	if it.VCpuInfo != nil {
+		info.VCPUs = aws.ToInt32(it.VCpuInfo.DefaultVCpus)
+	}
+
+	// Architectures
+	if it.ProcessorInfo != nil {
+		for _, arch := range it.ProcessorInfo.SupportedArchitectures {
+			info.Architectures = append(info.Architectures, string(arch))
+		}
+	}
+
+	// Memory
+	if it.MemoryInfo != nil {
+		info.MemoryMiB = aws.ToInt64(it.MemoryInfo.SizeInMiB)
+	}
+
+	// Storage
+	if it.InstanceStorageInfo != nil {
+		info.StorageGB = aws.ToInt64(it.InstanceStorageInfo.TotalSizeInGB)
+		if it.InstanceStorageInfo.Disks != nil && len(it.InstanceStorageInfo.Disks) > 0 {
+			info.StorageType = string(it.InstanceStorageInfo.Disks[0].Type)
+		}
+	}
+
+	// Network
+	if it.NetworkInfo != nil {
+		info.NetworkPerformance = aws.ToString(it.NetworkInfo.NetworkPerformance)
+	}
+
+	// Hypervisor
+	info.Hypervisor = string(it.Hypervisor)
+
+	return info
+}
+
+// launchTemplateFromAWS converts an AWS LaunchTemplate to our internal representation.
+func launchTemplateFromAWS(lt types.LaunchTemplate) LaunchTemplate {
+	template := LaunchTemplate{
+		LaunchTemplateID:   aws.ToString(lt.LaunchTemplateId),
+		LaunchTemplateName: aws.ToString(lt.LaunchTemplateName),
+		DefaultVersion:     aws.ToInt64(lt.DefaultVersionNumber),
+		LatestVersion:      aws.ToInt64(lt.LatestVersionNumber),
+		CreatedBy:          aws.ToString(lt.CreatedBy),
+		Tags:               make(map[string]string),
+	}
+
+	if lt.CreateTime != nil {
+		template.CreateTime = *lt.CreateTime
+	}
+
+	for _, tag := range lt.Tags {
+		template.Tags[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
+	}
+
+	return template
+}
+
+// spotInstanceRequestFromAWS converts an AWS SpotInstanceRequest to our internal representation.
+func spotInstanceRequestFromAWS(sir types.SpotInstanceRequest) SpotInstanceRequest {
+	req := SpotInstanceRequest{
+		RequestID:          aws.ToString(sir.SpotInstanceRequestId),
+		State:              string(sir.State),
+		InstanceID:         aws.ToString(sir.InstanceId),
+		SpotPrice:          aws.ToString(sir.SpotPrice),
+		LaunchGroup:        aws.ToString(sir.LaunchGroup),
+		ProductDescription: string(sir.ProductDescription),
+		Type:               string(sir.Type),
+		Tags:               make(map[string]string),
+	}
+
+	if sir.Status != nil {
+		req.StatusCode = aws.ToString(sir.Status.Code)
+		req.StatusMessage = aws.ToString(sir.Status.Message)
+	}
+
+	if sir.LaunchSpecification != nil {
+		req.InstanceType = string(sir.LaunchSpecification.InstanceType)
+		if sir.LaunchSpecification.Placement != nil {
+			req.AvailabilityZone = aws.ToString(sir.LaunchSpecification.Placement.AvailabilityZone)
+		}
+	}
+
+	if sir.CreateTime != nil {
+		req.CreateTime = *sir.CreateTime
+	}
+	if sir.ValidFrom != nil {
+		req.ValidFrom = *sir.ValidFrom
+	}
+	if sir.ValidUntil != nil {
+		req.ValidUntil = *sir.ValidUntil
+	}
+
+	for _, tag := range sir.Tags {
+		req.Tags[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
+	}
+
+	return req
 }
