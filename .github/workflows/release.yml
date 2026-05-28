@@ -14,21 +14,36 @@ jobs:
     strategy:
       matrix:
         include:
+          # Linux
           - goos: linux
             goarch: amd64
             suffix: linux-amd64
           - goos: linux
             goarch: arm64
             suffix: linux-arm64
+          - goos: linux
+            goarch: arm
+            suffix: linux-arm
+          - goos: linux
+            goarch: "386"
+            suffix: linux-i386
+          # macOS
           - goos: darwin
             goarch: amd64
             suffix: darwin-amd64
           - goos: darwin
             goarch: arm64
             suffix: darwin-arm64
+          # Windows
           - goos: windows
             goarch: amd64
             suffix: windows-amd64.exe
+          - goos: windows
+            goarch: arm64
+            suffix: windows-arm64.exe
+          - goos: windows
+            goarch: "386"
+            suffix: windows-i386.exe
 
     steps:
       - name: Checkout
