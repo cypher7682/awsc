@@ -20,11 +20,64 @@ A full-screen terminal UI for AWS, inspired by [K9s](https://k9scli.io/). Naviga
 
 ## Installation
 
-```bash
-# From source
-go install github.com/tpriestnall/awsc/cmd/awsc@latest
+### Download Binary (Recommended)
 
-# Or build locally
+Download the latest release for your platform from [GitHub Releases](https://github.com/cypher7682/awsc/releases/latest).
+
+**macOS (Apple Silicon):**
+```bash
+curl -sL https://github.com/cypher7682/awsc/releases/latest/download/awsc-darwin-arm64 -o awsc
+chmod +x awsc
+xattr -d com.apple.quarantine awsc  # Remove macOS quarantine
+sudo mv awsc /usr/local/bin/
+```
+
+**macOS (Intel):**
+```bash
+curl -sL https://github.com/cypher7682/awsc/releases/latest/download/awsc-darwin-amd64 -o awsc
+chmod +x awsc
+xattr -d com.apple.quarantine awsc  # Remove macOS quarantine
+sudo mv awsc /usr/local/bin/
+```
+
+**Linux (x86_64):**
+```bash
+curl -sL https://github.com/cypher7682/awsc/releases/latest/download/awsc-linux-amd64 -o awsc
+chmod +x awsc
+sudo mv awsc /usr/local/bin/
+```
+
+**Linux (ARM64):**
+```bash
+curl -sL https://github.com/cypher7682/awsc/releases/latest/download/awsc-linux-arm64 -o awsc
+chmod +x awsc
+sudo mv awsc /usr/local/bin/
+```
+
+**Windows (PowerShell):**
+```powershell
+Invoke-WebRequest -Uri https://github.com/cypher7682/awsc/releases/latest/download/awsc-windows-amd64.exe -OutFile awsc.exe
+# Move to a directory in your PATH
+```
+
+### Homebrew (coming soon)
+
+```bash
+brew install cypher7682/tap/awsc
+```
+
+### Go Install
+
+If you have Go installed:
+```bash
+go install github.com/tpriestnall/awsc/cmd/awsc@latest
+```
+
+### Build from Source
+
+```bash
+git clone https://github.com/cypher7682/awsc.git
+cd awsc
 make build
 ./bin/awsc
 ```
